@@ -68,6 +68,11 @@ a count.
   - **The boundary as a node**: a dashed **Internet** node with every way in
     one hop from it, so entry and exit points are obvious at a glance, and
     each exposed service wears its public hostname as a badge
+  - **Both addresses under each node**: the LAN address someone would type
+    and the public hostname it answers to, on separate lines - "on the LAN
+    only" and "also public" being different facts
+  - **Each add-on's own icon**, served by Supervisor through a signed URL,
+    with a ring of the status colour still showing around it
   - **Routers** from integrations reporting `device_tracker` entities with
     `source_type: router`
   - **Positions** by a barycentre pass that keeps connected nodes near each

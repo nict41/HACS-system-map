@@ -112,7 +112,7 @@
 // version in the console is always the version of the file that's running -
 // which is the first thing worth knowing when a dashboard misbehaves after
 // an update, and the quickest way to catch a stale browser cache.
-const VERSION = "1.5.0";
+const VERSION = "1.6.0";
 
 console.info(
   `%c SYSTEM-MAP-CARD %c v${VERSION} `,
@@ -818,6 +818,7 @@ class SystemMapCard extends HTMLElement {
     this._logRoutes = []; // ingress rules read out of logs
     this._logServices = []; // host:port endpoints add-ons named in their logs
     this._logSizes = new Map(); // slug -> bytes of log read, for the evidence panel
+    this._addonIcons = new Map(); // slug -> signed URL of the add-on's own icon
     this._refreshTimer = null;
     this._naturalViewBox = null; // full-fit viewBox, recomputed each render
     // Set of namespaced keys highlighted by the entity finder, or null:
@@ -1660,6 +1661,7 @@ class SystemMapCard extends HTMLElement {
       await this._fetchAddonInfo(addon.slug);
     }
     if (!this.isConnected) return;
+    await this._loadAddonIcons();
     await this._loadRouteLogs();
     this._derive();
     this._buildProblemIndex();
@@ -1669,6 +1671,30 @@ class SystemMapCard extends HTMLElement {
     // only the graph left the Exposed pill permanently absent, because it is
     // built from routes that did not exist at first render.
     this._renderAll();
+  }
+
+  // Add-ons ship their own icons, and Supervisor serves them - so the map can
+  // show what each thing actually is instead of a wall of identical generic
+  // shapes. The endpoint needs authentication that an <image> tag cannot
+  // send, so each URL is signed first; that is how Home Assistant's own
+  // frontend draws these. Signatures are short-lived, which is why this
+  // re-runs with every refresh, and any failure just leaves the derived icon
+  // in place.
+  async _loadAddonIcons() {
+    for (const addon of this._addons) {
+      if (!this.isConnected) return;
+      if (!addon.icon) continue; // the add-on ships no icon
+      try {
+        const res = await this._hass.connection.sendMessagePromise({
+          type: "auth/sign_path",
+          path: `/api/hassio/addons/${addon.slug}/icon`,
+          expires: 3600,
+        });
+        if (res?.path) this._addonIcons.set(addon.slug, res.path);
+      } catch (e) {
+        this._addonIcons.delete(addon.slug);
+      }
+    }
   }
 
   // Reads the log of any add-on holding a tunnel or proxy credential. That is
@@ -2165,7 +2191,11 @@ class SystemMapCard extends HTMLElement {
       const roles = PORT_ROLES.filter((r) => ports.includes(r.port));
       if (!roles.length && servesSmb(info)) roles.push({ role: "SMB file server" });
       const tier = roles.find((r) => r.tier)?.tier || "services";
+      // The lowest port an add-on answers on is the one a person would type.
+      const lanPort = [...hostPortsFor(info)].sort((a, b) => a - b)[0];
+      const address = this._primaryAddress();
       return {
+        lan: lanPort ? `${address ? `${address}:` : ":"}${lanPort}` : null,
         id: `addon_${slugify(addon.slug)}`,
         kind: "addon",
         slug: addon.slug,
@@ -2327,6 +2357,15 @@ class SystemMapCard extends HTMLElement {
 
     this._layoutBottom = y;
     return nodes;
+  }
+
+  // The address this instance answers on, used to show an add-on's LAN
+  // endpoint next to its public one. The primary interface if one is marked,
+  // otherwise the first that has an address at all.
+  _primaryAddress() {
+    const interfaces = this._system.network?.interfaces || [];
+    const chosen = interfaces.find((i) => i.primary && i.ipv4?.address?.length) || interfaces.find((i) => i.ipv4?.address?.length);
+    return chosen ? String(chosen.ipv4.address[0]).split("/")[0] : null;
   }
 
   // "localhost" and friends, plus this machine's own LAN addresses - a
@@ -2670,19 +2709,22 @@ class SystemMapCard extends HTMLElement {
       sub = `used by ${shown}${names.length > 2 ? ` +${names.length - 2}` : ""}`;
     }
 
-    // A public hostname is the single most useful thing to know about a node
-    // at a glance, so it outranks the counts.
-    if (n.hostname) sub = n.hostname;
+    // Where a thing is reachable is the question the map exists to answer, so
+    // both answers get a line of their own: the LAN address someone would
+    // type, and the hostname it answers to from outside. Neither replaces the
+    // other - "on the LAN only" and "also public" are different facts.
+    const subs = [];
+    const problem = this._problemFor(`node:${n.id}`);
+    if (problem) subs.push(problem.label);
+    if (n.lan) subs.push(n.lan);
+    if (n.hostname) subs.push(n.hostname);
     if (n.routes?.length) {
       const unresolved = n.routes.filter((r) => !r.targetId).length;
-      sub = `${n.routes.length} hostname${n.routes.length === 1 ? "" : "s"}${unresolved ? ` · ${unresolved} unmatched` : ""}`;
+      subs.push(`${n.routes.length} hostname${n.routes.length === 1 ? "" : "s"}${unresolved ? ` · ${unresolved} unmatched` : ""}`);
     }
+    if (!subs.length && sub) subs.push(sub);
 
-    // A problem outranks whatever the sub-label was going to say - the whole
-    // point of the join is that it's visible without clicking.
-    const problem = this._problemFor(`node:${n.id}`);
-    if (problem) sub = problem.label;
-    return { status, sub, problem };
+    return { status, sub: subs[0] || "", subs: subs.slice(0, 3), problem };
   }
 
   // Reduces the problem index for one node key to the single worst thing
@@ -2731,7 +2773,7 @@ class SystemMapCard extends HTMLElement {
     for (const n of visible) {
       const b = boxes[n.tier] || (boxes[n.tier] = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
       const topPad = n.badge ? n.r + 32 : n.r + 16;
-      const bottomPad = n.r + 40; // label + sub-label now render below the circle, not inside it
+      const bottomPad = n.r + 76; // label plus up to three sub-label lines, all below the circle
       b.minX = Math.min(b.minX, n.x - n.r - 16);
       b.maxX = Math.max(b.maxX, n.x + n.r + 16);
       b.minY = Math.min(b.minY, n.y - topPad);
@@ -2771,7 +2813,7 @@ class SystemMapCard extends HTMLElement {
 
     const nodesSvg = visible
       .map((n) => {
-        const { status, sub, problem } = this._nodeState(n);
+        const { subs, status, problem } = this._nodeState(n);
         const color = colorFor(status);
         this._nodePositions.set(`node:${n.id}`, { x: n.x, y: n.y, r: n.r });
         const isHi = !!this._highlight?.has(`node:${n.id}`);
@@ -2780,11 +2822,18 @@ class SystemMapCard extends HTMLElement {
           (n.kind === "internet" ? " smc-internet" : "") +
           (problem ? " smc-problem" : "") +
           (dimming ? (isHi ? " smc-hi" : " smc-dim") : "");
+        // The add-on's own icon where it ships one, drawn inside the circle so
+        // a ring of the status colour still shows around it. Otherwise the
+        // icon derived from what the add-on does.
+        const ownIcon = n.slug ? this._addonIcons.get(n.slug) : null;
         const iconPath = n.icon ? ICON_PATHS[n.icon] : null;
         const iconSize = n.r * 1.15;
-        const iconSvg = iconPath
-          ? `<g transform="translate(${n.x - iconSize / 2},${n.y - iconSize / 2}) scale(${iconSize / 24})" pointer-events="none"><path d="${iconPath}" fill="white" /></g>`
-          : "";
+        const ownSize = n.r * 1.5;
+        const iconSvg = ownIcon
+          ? `<image href="${escapeHtml(ownIcon)}" x="${n.x - ownSize / 2}" y="${n.y - ownSize / 2}" width="${ownSize}" height="${ownSize}" clip-path="url(#smc-node-clip)" preserveAspectRatio="xMidYMid slice" pointer-events="none" />`
+          : iconPath
+            ? `<g transform="translate(${n.x - iconSize / 2},${n.y - iconSize / 2}) scale(${iconSize / 24})" pointer-events="none"><path d="${iconPath}" fill="white" /></g>`
+            : "";
         return `
           <g class="${cls}" data-node="${n.id}">
             <circle cx="${n.x}" cy="${n.y}" r="${n.r}" fill="${color}" />
@@ -2792,7 +2841,9 @@ class SystemMapCard extends HTMLElement {
             ${n.badge ? `<text class="smc-badge" x="${n.x}" y="${n.y - n.r - 10}">${escapeHtml(n.badge)}</text>` : ""}
             ${problem ? `<circle cx="${n.x + n.r * 0.72}" cy="${n.y - n.r * 0.72}" r="9" fill="var(--error-color, #db4437)" stroke="var(--card-background-color, #fff)" stroke-width="2" /><text class="smc-problem-badge" x="${n.x + n.r * 0.72}" y="${n.y - n.r * 0.72 + 4}" style="fill:#fff">${escapeHtml(problem.badge)}</text>` : ""}
             <text x="${n.x}" y="${n.y + n.r + 16}">${escapeHtml(n.label)}</text>
-            ${sub ? `<text class="smc-sub" x="${n.x}" y="${n.y + n.r + 30}">${escapeHtml(sub)}</text>` : ""}
+            ${subs
+              .map((line, i) => `<text class="smc-sub" x="${n.x}" y="${n.y + n.r + 30 + i * 13}">${escapeHtml(line)}</text>`)
+              .join("")}
           </g>`;
       })
       .join("");
@@ -2859,6 +2910,11 @@ class SystemMapCard extends HTMLElement {
 
     this.querySelector(".smc-graph").innerHTML = `
       <svg viewBox="${this._viewBox.x} ${this._viewBox.y} ${this._viewBox.w} ${this._viewBox.h}" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <clipPath id="smc-node-clip" clipPathUnits="objectBoundingBox">
+            <circle cx="0.5" cy="0.5" r="0.5" />
+          </clipPath>
+        </defs>
         ${boxesSvg}
         ${tierLabelsSvg}
         ${edgesSvg}

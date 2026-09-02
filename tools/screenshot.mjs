@@ -36,7 +36,7 @@ const ADDONS = [
   ["core_configurator", "File editor", "started"],
   ["a0d7b954_nodered", "Node-RED", "started"],
   ["core_mariadb", "MariaDB", "stopped"],
-].map(([slug, name, state]) => ({ slug, name, state, version: "1.4.2", update_available: slug.includes("zigbee") }));
+].map(([slug, name, state]) => ({ slug, name, state, version: "1.4.2", icon: true, update_available: slug.includes("zigbee") }));
 
 const ENTRIES = [
   ["mqtt", "Mosquitto"], ["zha", "ZHA"], ["asusrouter", "ASUS Router"], ["huawei_lte", "Huawei LTE"],
@@ -156,6 +156,21 @@ const page = `<!doctype html><html><head><meta charset="utf-8"><style>
             return { data: { name, state: "started", version: "1.4.2", options: {}, ...(ADDON_OPTIONS[slug] || {}) } };
           }
           throw new Error("no fixture for " + msg.endpoint);
+        }
+        if (msg.type === "auth/sign_path") {
+          // Stands in for Supervisor's real icon endpoint: a distinct mark
+          // per add-on, so the rendered image shows what shipping icons
+          // actually look like rather than a wall of identical clouds.
+          const slug = msg.path.split("/")[4];
+          const seed = [...slug].reduce((a, ch) => a + ch.charCodeAt(0), 0);
+          const initials = (ADDONS.find((a) => a.slug === slug)?.name || slug)
+            .replace(/[^A-Za-z ]/g, " ").split(/\s+/).filter(Boolean).slice(0, 2)
+            .map((w) => w[0].toUpperCase()).join("");
+          const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">' +
+            '<rect width="64" height="64" fill="hsl(' + (seed % 360) + ',55%,42%)"/>' +
+            '<text x="32" y="43" font-family="sans-serif" font-size="27" font-weight="700" fill="white" text-anchor="middle">' +
+            initials + '</text></svg>';
+          return { path: "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg) };
         }
         if (msg.type === "config_entries/get") return ENTRIES;
         if (msg.type === "config/entity_registry/list") return ENTITIES;

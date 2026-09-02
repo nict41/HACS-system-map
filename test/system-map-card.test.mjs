@@ -28,7 +28,10 @@ const makeEl = () => ({
 
 const ctx = {
   console, setTimeout, clearTimeout, Blob: class {}, XMLSerializer: class {},
-  HTMLElement: class { querySelector() { return null; } addEventListener() {} appendChild() {} },
+  // isConnected is a real DOM property the card checks before doing
+  // background work; on a bare stub it is undefined, which would silently
+  // skip every background loader under test.
+  HTMLElement: class { get isConnected() { return true; } querySelector() { return null; } addEventListener() {} appendChild() {} },
   customElements: { define: () => {} },
   window: { customCards: [], addEventListener: () => {} },
   document: { addEventListener: () => {}, createElement: () => makeEl(), createElementNS: () => makeEl() },
@@ -367,6 +370,45 @@ T("add-ons placed in a tier are not repeated in the leftovers grid",
     return c._addons.every((a) => !c._nodePositions.has(`addon:${a.slug}`));
   })(), true);
 
+// --- add-on icons ----------------------------------------------------------
+// Supervisor serves each add-on's own icon, but the endpoint needs auth an
+// <image> tag cannot send - hence the signed URL, exactly as HA's own
+// frontend does it.
+T("an icon URL is signed for every add-on that ships one",
+  await (async () => {
+    const card = newCard();
+    const asked = [];
+    card._hass.connection = {
+      sendMessagePromise: async (msg) => {
+        asked.push(msg.path);
+        return { path: `${msg.path}?authSig=xyz` };
+      },
+    };
+    card._addons = [
+      { slug: "a_with", name: "Has icon", state: "started", icon: true },
+      { slug: "b_without", name: "No icon", state: "started", icon: false },
+    ];
+    await card._loadAddonIcons();
+    return [asked, [...card._addonIcons.keys()]];
+  })(),
+  [["/api/hassio/addons/a_with/icon"], ["a_with"]]);
+T("a failure to sign leaves the derived icon in place rather than a blank",
+  await (async () => {
+    const card = newCard();
+    card._hass.connection = { sendMessagePromise: async () => { throw new Error("nope"); } };
+    card._addons = [{ slug: "a_with", name: "Has icon", state: "started", icon: true }];
+    await card._loadAddonIcons();
+    return card._addonIcons.size;
+  })(), 0);
+T("the add-on's own icon is drawn when there is one, and the derived one when not",
+  (() => {
+    const card = newCard();
+    card._addonIcons.set("3b88f413_immich", "/api/hassio/addons/3b88f413_immich/icon?authSig=xyz");
+    card._renderGraph();
+    const svg = card._els.get(".smc-graph").innerHTML;
+    return [svg.includes("<image href=\"/api/hassio/addons/3b88f413_immich/icon?authSig=xyz\""), svg.includes("clip-path=\"url(#smc-node-clip)\"")];
+  })(), [true, true]);
+
 // --- host networking -------------------------------------------------------
 // An add-on running on the host network publishes nothing through `network`
 // (the field is null). That is the normal case for Samba and for several
@@ -464,11 +506,20 @@ T("the boundary counts the ways in and the hostnames behind them",
   internet().notes, ["1 way in from outside", "2 public hostnames"]);
 
 // The subdomain belongs on the node, not buried in a detail panel.
-T("an exposed service wears its hostname as a badge and a sub-label",
+// "On the LAN" and "also public" are different facts, so both get a line.
+T("an exposed service shows its LAN address and its public hostname",
   (() => {
     const node = c._node(addonId("3b88f413_immich"));
-    return [node.badge, node.hostname, c._nodeState(node).sub];
-  })(), ["nas.example.com", "nas.example.com", "nas.example.com"]);
+    return [node.badge, c._nodeState(node).subs];
+  })(), ["nas.example.com", ["192.168.8.25:8080", "nas.example.com"]]);
+T("a LAN-only service shows just its address",
+  c._nodeState(c._node(addonId("core_mosquitto"))).subs.includes("192.168.8.25:1883"), true);
+T("a service with no reachable port shows neither",
+  c._nodeState(c._node(addonId("beb500c8_kiwix"))).subs.some((l) => l.includes(":")), false);
+T("a problem still comes first",
+  c._nodeState(c._node(addonId("core_mosquitto"))).subs[0], "1/2 unavailable");
+T("no more than three lines are ever drawn under a node",
+  c._derived.nodes.every((n) => c._nodeState(n).subs.length <= 3), true);
 T("Home Assistant itself wears the hostname routed to port 8123",
   [c._node("host").badge, c._node("host").exposedUrl],
   ["ha.example.com", "https://ha.example.com"]);

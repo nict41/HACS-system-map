@@ -8,6 +8,25 @@ was already there in a way an existing dashboard would notice.
 `VERSION` in `system-map-card.js` is the source of truth and CI refuses to
 publish a release whose tag doesn't match it.
 
+## [1.6.0] - 2026-09-02
+
+### Added
+
+- **Add-ons wear their own icons.** Nearly every add-on publishes no port the
+  card recognises, so nearly every add-on fell back to the same generic
+  cloud - a wall of identical shapes that told you nothing. Supervisor serves
+  each add-on's real icon, so the card now shows that instead. The endpoint
+  needs authentication an `<image>` tag cannot send, so each URL is signed
+  first (`auth/sign_path`) exactly as Home Assistant's own frontend does it.
+  The icon is drawn inside the circle, leaving a ring of the status colour
+  visible around it, and anything without a shipped icon keeps the icon
+  derived from what it does.
+- **Local and public reachability are both on the map.** "On the LAN" and
+  "also reachable from outside" are different facts, so each gets a line
+  under the node: Immich reads `192.168.8.25:8080` and `nas.example.com`, one
+  above the other. A problem still takes the first line, since that outranks
+  both.
+
 ## [1.5.0] - 2026-09-02
 
 ### Fixed
