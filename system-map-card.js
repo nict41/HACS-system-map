@@ -116,7 +116,7 @@
 // version in the console is always the version of the file that's running -
 // which is the first thing worth knowing when a dashboard misbehaves after
 // an update, and the quickest way to catch a stale browser cache.
-const VERSION = "1.1.1";
+const VERSION = "1.1.2";
 
 console.info(
   `%c SYSTEM-MAP-CARD %c v${VERSION} `,
@@ -871,7 +871,11 @@ class SystemMapCard extends HTMLElement {
         .smc-edge { stroke: var(--divider-color, #999); stroke-width: 2; fill: none; transition: opacity 0.15s ease; }
         .smc-edge.dashed { stroke-dasharray: 5 4; opacity: 0.6; }
         .smc-edge.smc-dim { opacity: 0.08; }
-        .smc-edge-label { fill: var(--secondary-text-color); font-size: 10px; text-anchor: middle; }
+        /* paint-order draws the stroke behind the fill, giving each label a
+           halo in the graph's own background colour - so where a label does
+           end up crossing an edge line it stays readable. */
+        .smc-edge-label { fill: var(--secondary-text-color); font-size: 10px; text-anchor: middle;
+          paint-order: stroke; stroke: var(--secondary-background-color, #f7f7f7); stroke-width: 3px; stroke-linejoin: round; }
         .smc-detail { margin: 10px 0; padding: 10px 12px; border-radius: 8px; background: var(--secondary-background-color, #f2f2f2); font-size: 0.9em; color: var(--primary-text-color); position: relative; flex: 0 0 auto; }
         .smc-detail-close { position: absolute; top: 6px; right: 10px; cursor: pointer; color: var(--secondary-text-color); font-size: 1.1em; }
         .smc-role { margin: 4px 0 8px; color: var(--primary-text-color); opacity: 0.85; }
@@ -1671,15 +1675,30 @@ class SystemMapCard extends HTMLElement {
   // HACS, firmware...) and the Supervisor add-on list, which reports add-on
   // updates through its own flag rather than an entity.
   _pendingUpdates() {
-    const out = [];
+    // An add-on update reaches this card twice: as an `update.*` entity the
+    // Supervisor integration creates, named "<Add-on> Update", and as the
+    // `update_available` flag on the add-on itself, named "<Add-on>". A set
+    // of the raw names doesn't collapse those - the two spellings differ by
+    // that one word - which is how a single Zigbee2MQTT update counted as
+    // two. Dedupe on the name with a trailing "update" and all punctuation
+    // stripped, so both spellings land on the same key.
+    const seen = new Map();
+    const add = (name) => {
+      const display = String(name ?? "").replace(/\s*\bupdates?\b\s*$/i, "").trim() || String(name ?? "");
+      const key = display.toLowerCase().replace(/[^a-z0-9]/g, "");
+      if (key && !seen.has(key)) seen.set(key, display);
+    };
+
+    // Add-ons first: the Supervisor's own name for an add-on is the better
+    // display name, and the first spelling seen is the one kept.
+    for (const addon of this._addons) {
+      if (addon.update_available) add(addon.name || addon.slug);
+    }
     for (const [entityId, st] of Object.entries(this._hass?.states || {})) {
       if (!entityId.startsWith("update.") || st.state !== "on") continue;
-      out.push(st.attributes?.friendly_name || entityId.replace("update.", ""));
+      add(st.attributes?.friendly_name || entityId.slice("update.".length));
     }
-    for (const addon of this._addons) {
-      if (addon.update_available) out.push(addon.name || addon.slug);
-    }
-    return [...new Set(out)];
+    return [...seen.values()];
   }
 
   _renderStatusBar() {
@@ -2102,6 +2121,7 @@ class SystemMapCard extends HTMLElement {
       .join("");
 
     const byId = new Map(layout.map((n) => [n.id, n]));
+    const edgeLabels = [];
     const edgesSvg = this._edges()
       .filter(([fromId, toId]) => !hidden.has(fromId) && !hidden.has(toId))
       .map(([fromId, toId, opts]) => {
@@ -2111,11 +2131,13 @@ class SystemMapCard extends HTMLElement {
         const edgeHi = !!(this._highlight?.has(`node:${fromId}`) && this._highlight?.has(`node:${toId}`));
         const cls = "smc-edge" + (opts?.dashed ? " dashed" : "") + (dimming && !edgeHi ? " smc-dim" : "");
         const line = `<line class="${cls}" x1="${from.x}" y1="${from.y}" x2="${to.x}" y2="${to.y}" />`;
-        const label = opts?.label
-          ? `<text class="smc-edge-label" x="${(from.x + to.x) / 2}" y="${(from.y + to.y) / 2 - 6}">${escapeHtml(opts.label)}</text>`
-          : "";
-        return line + label;
+        if (opts?.label) edgeLabels.push({ text: opts.label, x: (from.x + to.x) / 2, y: (from.y + to.y) / 2 - 6 });
+        return line;
       })
+      .join("");
+
+    const labelsSvg = this._placeEdgeLabels(edgeLabels, visible)
+      .map((l) => `<text class="smc-edge-label" x="${l.x}" y="${l.y}">${escapeHtml(l.text)}</text>`)
       .join("");
 
     const nodesSvg = visible
@@ -2208,6 +2230,7 @@ class SystemMapCard extends HTMLElement {
         ${boxesSvg}
         ${tierLabelsSvg}
         ${edgesSvg}
+        ${labelsSvg}
         ${nodesSvg}
         ${gridsSvg}
       </svg>`;
@@ -2231,6 +2254,56 @@ class SystemMapCard extends HTMLElement {
     return [...groups.entries()].sort(([a], [b]) =>
       a === "No area" ? 1 : b === "No area" ? -1 : a.localeCompare(b)
     );
+  }
+
+  // Edge labels start at their edge's midpoint and are nudged vertically
+  // until they stop overlapping each other or a node. Several edges
+  // converging on one node otherwise stack their labels in the same few
+  // pixels: around the host, "serves (moredisks)", "admin access" and "NAS1
+  // (SMB loop)" all landed on top of each other and on the host's own name.
+  // Greedy and deterministic - good enough for a few dozen labels, and it
+  // never reorders them, so the map doesn't reshuffle between renders.
+  _placeEdgeLabels(labels, nodes) {
+    const LINE_H = 13;
+    const CHAR_W = 5.2; // 10px font, averaged - only needs to be close
+    // Boxes that merely touch look like one long label ("admin access serves
+    // (moredisks)"), so each claims a little more room than it draws.
+    const PAD_X = 7;
+    // Seed with the nodes themselves so a label is never written across a
+    // circle or the name underneath it.
+    const taken = nodes.map((n) => ({
+      x0: n.x - n.r,
+      x1: n.x + n.r,
+      y0: n.y - n.r,
+      y1: n.y + n.r + 34, // the label and sub-label rows below the circle
+    }));
+    // How much of `box` is buried under things already placed. Zero means a
+    // free slot; otherwise it ranks the candidates so a crowded label can
+    // still take the least-bad position rather than staying where it was.
+    const buried = (box) =>
+      taken.reduce((sum, t) => {
+        const w = Math.min(box.x1, t.x1) - Math.max(box.x0, t.x0);
+        const h = Math.min(box.y1, t.y1) - Math.max(box.y0, t.y0);
+        return sum + (w > 0 && h > 0 ? w * h : 0);
+      }, 0);
+
+    for (const label of labels) {
+      const halfW = (label.text.length * CHAR_W) / 2 + PAD_X;
+      let best = null;
+      for (let attempt = 0; attempt < 16; attempt++) {
+        // Alternate above and below the midpoint, further out each pair, so
+        // a label ends up as close to its own edge as it can get.
+        const step = Math.ceil(attempt / 2) * LINE_H * (attempt % 2 ? 1 : -1);
+        const y = label.y + step;
+        const box = { x0: label.x - halfW, x1: label.x + halfW, y0: y - LINE_H / 2, y1: y + LINE_H / 2 };
+        const cost = buried(box);
+        if (!best || cost < best.cost) best = { y, box, cost };
+        if (cost === 0) break;
+      }
+      label.y = best.y;
+      taken.push(best.box);
+    }
+    return labels;
   }
 
   // One auto-laid-out grid section: a bounding box, a label, and a circle

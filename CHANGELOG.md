@@ -8,6 +8,34 @@ was already there in a way an existing dashboard would notice.
 `VERSION` in `system-map-card.js` is the source of truth and CI refuses to
 publish a release whose tag doesn't match it.
 
+## [1.1.2] - 2026-09-02
+
+### Fixed
+
+- One add-on update counted as two. Home Assistant reports an add-on update
+  twice - as an `update.*` entity the Supervisor creates, named
+  "<Add-on> Update", and as the `update_available` flag on the add-on itself,
+  named "<Add-on>" - and a set of the raw names doesn't collapse those,
+  because the two spellings differ by that one word. Deduplication now
+  ignores a trailing "update" and punctuation, so the two spellings land on
+  the same key, and the shorter name is the one displayed.
+- Edge labels no longer pile up. They were drawn at their edge's exact
+  midpoint, so several edges converging on one node stacked their labels in
+  the same few pixels - around the host, "serves (moredisks)", "admin access"
+  and "NAS1 (SMB loop)" were written on top of each other and on the host's
+  own name. Labels are now nudged vertically until they clear both each other
+  and every node, taking the least-obscured position when nothing is
+  completely free, and each is drawn with a halo in the background colour so
+  a label crossing an edge line stays readable.
+
+### Changed
+
+- The Release workflow copes with a release published from the GitHub
+  website. Publishing there creates the tag, which fires the workflow, which
+  previously failed trying to create a release that already existed; it now
+  attaches the card to whichever release is there. The tag-vs-`VERSION` check
+  runs either way.
+
 ## [1.1.1] - 2026-09-02
 
 ### Added

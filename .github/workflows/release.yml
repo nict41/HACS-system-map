@@ -1,10 +1,16 @@
 name: Release
 
-# HACS installs a plugin from a GitHub *release*, not from a bare tag, so
-# pushing a tag has to create one. Tag and publish in one step:
+# HACS installs a plugin from a GitHub *release*, not from a bare tag.
 #
-#   git tag v1.2.3 && git push origin v1.2.3
+# Either route works and both end up here:
+#   - From the website: Releases -> "Draft a new release" -> type the tag in
+#     "Choose a tag" -> "Create new tag on publish" -> Publish. Publishing
+#     creates the tag, which fires this workflow.
+#   - From a terminal: git tag v1.2.3 && git push origin v1.2.3
 #
+# So this workflow must cope with the release already existing by the time it
+# runs. It attaches the card to whichever release is there rather than
+# failing, and still checks the tag against VERSION either way.
 on:
   push:
     tags:
@@ -35,11 +41,16 @@ jobs:
       - name: Run the tests
         run: node test/system-map-card.test.mjs
 
-      - name: Create the release
+      - name: Create or update the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" \
-            --title "${GITHUB_REF_NAME}" \
-            --generate-notes \
-            system-map-card.js
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo "Release ${GITHUB_REF_NAME} already exists (published from the website); attaching the card to it."
+            gh release upload "${GITHUB_REF_NAME}" system-map-card.js --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              --title "${GITHUB_REF_NAME}" \
+              --generate-notes \
+              system-map-card.js
+          fi

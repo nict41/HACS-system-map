@@ -331,6 +331,86 @@ T("findDeviceInOptions reports the option key and what it matched",
   ctx.findDeviceInOptions({ serial: { port: "/dev/ttyUSB0" } }, { paths: ["/dev/ttyUSB0"], labels: [] }),
   { option: "serial.port", matched: "/dev/ttyUSB0" });
 
+// --- pending updates -------------------------------------------------------
+// HA reports an add-on update twice: as an update.* entity named
+// "<Add-on> Update", and as the add-on's own update_available flag named
+// "<Add-on>". One update was being counted as two.
+const updatesFor = (states, addons) => {
+  const card = newCard();
+  card._hass = { states };
+  if (addons) card._addons = addons;
+  return card._pendingUpdates();
+};
+T("an add-on update reported by both routes counts once",
+  updatesFor(
+    { "update.zigbee2mqtt_update": { state: "on", attributes: { friendly_name: "Zigbee2MQTT Update" } } },
+    [{ slug: "45df7312_zigbee2mqtt", name: "Zigbee2MQTT", update_available: true }]
+  ),
+  ["Zigbee2MQTT"]);
+T("the trailing word is stripped from the display name",
+  updatesFor({ "update.core": { state: "on", attributes: { friendly_name: "Home Assistant Core Update" } } }, []),
+  ["Home Assistant Core"]);
+T("genuinely different updates are all counted",
+  updatesFor(
+    {
+      "update.zigbee2mqtt_update": { state: "on", attributes: { friendly_name: "Zigbee2MQTT Update" } },
+      "update.core": { state: "on", attributes: { friendly_name: "Home Assistant Core Update" } },
+      "update.quiet": { state: "off", attributes: { friendly_name: "Not Pending" } },
+    },
+    [{ slug: "45df7312_zigbee2mqtt", name: "Zigbee2MQTT", update_available: true }]
+  ).sort(),
+  ["Home Assistant Core", "Zigbee2MQTT"]);
+T("nothing pending is an empty list", updatesFor({}, []), []);
+
+// --- edge label placement --------------------------------------------------
+T("labels converging on one point are separated",
+  (() => {
+    const card = newCard();
+    const placed = card._placeEdgeLabels(
+      [
+        { text: "serves (moredisks)", x: 600, y: 200 },
+        { text: "admin access", x: 600, y: 200 },
+        { text: "NAS1 (SMB loop)", x: 600, y: 200 },
+      ],
+      []
+    );
+    const ys = placed.map((l) => l.y);
+    return new Set(ys).size === ys.length;
+  })(), true);
+T("a label is moved off a node it would otherwise be written across",
+  (() => {
+    const card = newCard();
+    const [label] = card._placeEdgeLabels([{ text: "disk", x: 610, y: 150 }], [{ x: 610, y: 150, r: 62 }]);
+    return Math.abs(label.y - 150) > 62;
+  })(), true);
+T("a label with nothing in its way keeps its own midpoint",
+  newCard()._placeEdgeLabels([{ text: "USB", x: 300, y: 400 }], [])[0].y, 400);
+T("with every slot blocked, a label still moves to the least-buried one",
+  (() => {
+    // A continuous wall of small nodes means no candidate is free, so the
+    // label has to be ranked rather than given up on. One big node sits on
+    // the midpoint, making that specific slot strictly the worst - staying
+    // put would be the old behaviour and is what this catches.
+    const card = newCard();
+    const wall = Array.from({ length: 24 }, (_, i) => ({ x: 500, y: 120 + i * 30, r: 2 }));
+    const [label] = card._placeEdgeLabels([{ text: "buried", x: 500, y: 360 }], [...wall, { x: 500, y: 360, r: 70 }]);
+    return label.y !== 360;
+  })(), true);
+T("adjacent labels are separated even when their boxes only touch",
+  (() => {
+    const card = newCard();
+    const placed = card._placeEdgeLabels(
+      [{ text: "admin access", x: 560, y: 240 }, { text: "serves (moredisks)", x: 610, y: 240 }],
+      []
+    );
+    return placed[0].y !== placed[1].y;
+  })(), true);
+T("placement never reorders the labels",
+  newCard()
+    ._placeEdgeLabels([{ text: "a", x: 0, y: 0 }, { text: "b", x: 0, y: 0 }, { text: "c", x: 0, y: 0 }], [])
+    .map((l) => l.text),
+  ["a", "b", "c"]);
+
 // --- error reporting -------------------------------------------------------
 // A Container or Core install has no Supervisor, so every one of those
 // endpoints fails at once. Eight near-identical messages in a red bar reads
