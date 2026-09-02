@@ -65,6 +65,9 @@ a count.
   - **Exported shares as nodes**: disk → the add-on exporting it → the share
     → everything mounting it, so the chain is visible rather than implied by
     edge labels
+  - **The boundary as a node**: a dashed **Internet** node with every way in
+    one hop from it, so entry and exit points are obvious at a glance, and
+    each exposed service wears its public hostname as a badge
   - **Routers** from integrations reporting `device_tracker` entities with
     `source_type: router`
   - **Positions** by a barycentre pass that keeps connected nodes near each

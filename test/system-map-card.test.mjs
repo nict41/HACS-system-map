@@ -367,6 +367,51 @@ T("add-ons placed in a tier are not repeated in the leftovers grid",
     return c._addons.every((a) => !c._nodePositions.has(`addon:${a.slug}`));
   })(), true);
 
+// --- the boundary ----------------------------------------------------------
+// "Which of these is a way in?" should be answerable from the shape of the
+// map, not by reading tier labels.
+const internet = (card = c) => card._derived.nodes.find((n) => n.kind === "internet");
+T("the outside world is drawn as a node once anything is reachable from it",
+  [internet()?.label, internet()?.tier, internet()?.badge],
+  ["Internet", "remote", "OUTSIDE"]);
+T("every entry point is one hop from the outside",
+  c._derived.edges.filter((e) => e[0] === "internet").map((e) => [e[1], e[2].label]),
+  [[addonId("9074a9fa_cloudflared"), "2 hostnames"]]);
+T("a VPN add-on is an entry point even with no hostnames",
+  (() => {
+    const vpn = newCard({}, { logRoutes: [] });
+    vpn._addons.push({ slug: "a0d7b954_tailscale", name: "Tailscale", state: "started" });
+    vpn._addonInfoCache.set("a0d7b954_tailscale", { name: "Tailscale", network: { "41641/udp": 41641 }, options: {} });
+    vpn._derive();
+    return vpn._derived.edges.filter((e) => e[0] === "internet").map((e) => e[2].label);
+  })(), ["VPN"]);
+T("no way in means no boundary node - nothing to assert",
+  (() => {
+    const closed = newCard({}, { logRoutes: [] });
+    closed._addons = closed._addons.filter((a) => a.slug !== "9074a9fa_cloudflared");
+    closed._derive();
+    return internet(closed);
+  })(), undefined);
+T("the boundary counts the ways in and the hostnames behind them",
+  internet().notes, ["1 way in from outside", "2 public hostnames"]);
+
+// The subdomain belongs on the node, not buried in a detail panel.
+T("an exposed service wears its hostname as a badge and a sub-label",
+  (() => {
+    const node = c._node(addonId("3b88f413_immich"));
+    return [node.badge, node.hostname, c._nodeState(node).sub];
+  })(), ["nas.example.com", "nas.example.com", "nas.example.com"]);
+T("Home Assistant itself wears the hostname routed to port 8123",
+  [c._node("host").badge, c._node("host").exposedUrl],
+  ["ha.example.com", "https://ha.example.com"]);
+T("a node with no route has no hostname badge",
+  c._node(addonId("beb500c8_kiwix")).badge, undefined);
+T("the status bar says how much is reachable from outside",
+  (() => {
+    const item = c._statusItems().find((i) => i.key === "exposed");
+    return [item?.value, item?.note.includes("nas.example.com")];
+  })(), ["2 hostnames", true]);
+
 // --- reading services out of a log -----------------------------------------
 // Immich announces its machine-learning sidecar at runtime rather than in its
 // options: "Machine learning server became healthy (http://192.168.8.25:3004)".

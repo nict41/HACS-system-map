@@ -88,7 +88,7 @@ const RESPONSES = {
   "/core/info": { version: "2026.8.3", version_latest: "2026.9.0", update_available: true, arch: "amd64", machine: "generic-x86-64" },
   "/os/info": { version: "18.2", version_latest: "18.2", update_available: false, board: "generic-x86-64" },
   "/supervisor/info": { version: "2026.08.0", channel: "stable", update_available: false },
-  "/network/info": { host_internet: true, supervisor_internet: true, interfaces: [{ interface: "enp1s0", type: "ethernet", primary: true, connected: true, ipv4: { address: ["192.168.8.50/24"] } }] },
+  "/network/info": { host_internet: true, supervisor_internet: true, interfaces: [{ interface: "enp1s0", type: "ethernet", primary: true, connected: true, ipv4: { address: ["192.168.8.25/24"] } }] },
   "/backups": { backups: [{ slug: "b1", name: "Automatic backup", date: new Date(now - 41 * 60000).toISOString(), size: 512 }] },
   "/hardware/info": {
     devices: [{ name: "ttyUSB0", subsystem: "tty", dev_path: "/dev/ttyUSB0", by_id: "/dev/serial/by-id/usb-ITEAD_SONOFF_Zigbee_3.0_USB_Dongle_Plus_V2_abc-if00-port0" }],

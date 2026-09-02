@@ -8,6 +8,34 @@ was already there in a way an existing dashboard would notice.
 `VERSION` in `system-map-card.js` is the source of truth and CI refuses to
 publish a release whose tag doesn't match it.
 
+## [1.4.0] - 2026-09-02
+
+### Added
+
+- **The outside world is a node.** "Which of these is a way in?" was
+  answerable only by reading tier labels and edge text. The boundary is now
+  drawn - a dashed orange **Internet** node - and every entry point is one
+  hop from it, so the shape of the map answers the question. An entry point
+  is anything terminating traffic from outside: an add-on publishing
+  hostnames through a tunnel, or one running a VPN. Both are established from
+  evidence (ingress rules, published ports), not from names, and the edge
+  says which - `4 hostnames` or `VPN`. No ways in means no boundary node,
+  because there would be nothing to assert.
+- **Public hostnames are on the map again**, and this time on the node itself
+  rather than in a panel you have to click into: the subdomain is both the
+  node's badge and its sub-label, so `nas.example.com` sits under Immich and
+  `ha.example.com` under Home Assistant. A hostname outranks the device and
+  entity counts for that sub-label, being the more useful thing to know at a
+  glance.
+- An **Exposed** pill in the status bar: how many hostnames are reachable
+  from outside and through what, with the full hostname → service mapping
+  behind a click.
+
+### Fixed
+
+- Badge text is no longer forced to upper case. It was written for the words
+  it used to hold; a hostname in capitals reads as shouting.
+
 ## [1.3.1] - 2026-09-02
 
 ### Fixed

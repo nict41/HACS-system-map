@@ -112,7 +112,7 @@
 // version in the console is always the version of the file that's running -
 // which is the first thing worth knowing when a dashboard misbehaves after
 // an update, and the quickest way to catch a stale browser cache.
-const VERSION = "1.3.1";
+const VERSION = "1.4.0";
 
 console.info(
   `%c SYSTEM-MAP-CARD %c v${VERSION} `,
@@ -349,6 +349,7 @@ const HOST_STATS = [
 ];
 
 
+const INTERNET_COLOR = "#ffa726"; // the boundary, in the remote tier's own hue
 const COLORS = {
   started: "var(--success-color, #43a047)",
   loaded: "var(--success-color, #43a047)",
@@ -360,6 +361,7 @@ const COLORS = {
   ignored: "var(--warning-color, #ff9800)",
   host: "var(--primary-color, #3f51b5)",
   hardware: "#546e7a",
+  internet: INTERNET_COLOR,
   unknown: "#78909c",
 };
 
@@ -931,7 +933,7 @@ class SystemMapCard extends HTMLElement {
         .smc-zoom-controls button:hover { background: var(--secondary-background-color, #eee); }
         .smc-tier-box { stroke-width: 2; }
         .smc-tier-label { font-size: 12px; font-weight: 700; letter-spacing: 0.4px; text-transform: uppercase; }
-        .smc-badge { fill: #ffca28; font-size: 10px; font-weight: 700; text-anchor: middle; letter-spacing: 0.3px; text-transform: uppercase; }
+        .smc-badge { fill: #ffca28; font-size: 10px; font-weight: 700; text-anchor: middle; letter-spacing: 0.3px; }
         .smc-node circle { stroke: var(--card-background-color, #fff); stroke-width: 3; cursor: pointer; transition: opacity 0.15s ease; }
         .smc-node text { fill: var(--primary-text-color); font-size: 12px; font-weight: 500; text-anchor: middle; pointer-events: none; }
         .smc-node .smc-sub { fill: var(--secondary-text-color); font-size: 10px; font-weight: 400; }
@@ -992,6 +994,10 @@ class SystemMapCard extends HTMLElement {
         .smc-legend span { display: inline-flex; align-items: center; gap: 4px; }
         .smc-legend i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
         .smc-node.smc-problem circle { stroke: var(--error-color, #db4437); stroke-width: 4; }
+        /* The boundary node gets a dashed ring: it isn't a thing running on
+           this machine, it's where the machine stops. */
+        .smc-node.smc-internet circle { stroke: #ffa726; stroke-width: 3; stroke-dasharray: 6 4; }
+        .smc-node.smc-internet text { font-weight: 600; }
         .smc-problem-badge { fill: var(--error-color, #db4437); font-size: 10px; font-weight: 700; text-anchor: middle; }
         .smc-detail-section { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--divider-color, #ddd); }
         .smc-detail-section h4 { margin: 0 0 4px; font-size: 0.85em; font-weight: 600; color: var(--secondary-text-color); }
@@ -1788,6 +1794,20 @@ class SystemMapCard extends HTMLElement {
       items.push({ key: "internet", label: "Internet", value: up ? "connected" : "no connectivity", tone: up ? "ok" : "bad", note: "" });
     }
 
+    // The one number worth surfacing about the boundary: how much of this
+    // instance is reachable from outside, and through what.
+    const routes = this._routes || [];
+    if (routes.length) {
+      const via = [...new Set(routes.map((r) => r.viaSlug).filter(Boolean))];
+      items.push({
+        key: "exposed",
+        label: "Exposed",
+        value: `${routes.length} hostname${routes.length === 1 ? "" : "s"}`,
+        tone: "info",
+        note: `${routes.map((r) => r.hostname).join(", ")} - via ${via.join(", ")}`,
+      });
+    }
+
     const open = this._issues.filter((i) => !i.ignored);
     if (open.length) {
       items.push({
@@ -2014,14 +2034,69 @@ class SystemMapCard extends HTMLElement {
       const target = addons.find((n) => n.id === route.targetId);
       if (target && !target.exposedUrl) {
         target.exposedUrl = `https://${route.hostname}`;
-        target.badge = "public";
+        target.hostname = route.hostname;
+        target.badge = route.hostname; // the subdomain, on the node itself
         target.notes.push(`Reachable at ${route.hostname} through ${route.viaSlug}`);
       }
     }
-    const nodes = [this._hostNode(routes), ...hardware.nodes, ...addons, ...this._deriveNetworkIntegrations()];
-    const edges = [...hardware.edges, ...this._deriveServiceEdges(nodes, routes)];
+    const internet = this._deriveInternet(addons, routes);
+    const nodes = [
+      this._hostNode(routes),
+      ...hardware.nodes,
+      ...addons,
+      ...this._deriveNetworkIntegrations(),
+      ...internet.nodes,
+    ];
+    const edges = [...hardware.edges, ...this._deriveServiceEdges(nodes, routes), ...internet.edges];
     this._routes = routes;
     this._derived = { nodes: this._autoLayout(nodes, edges), edges };
+  }
+
+  // The boundary, drawn. "Which of these is a way in from outside?" was
+  // answerable only by reading tier labels and edge text; with the outside
+  // world as a node, every entry point is one hop from it and the shape of
+  // the map answers the question. An entry point is anything that terminates
+  // traffic from outside: an add-on publishing hostnames through a tunnel,
+  // or one running a VPN (both established from evidence, not from names).
+  _deriveInternet(addonNodes, routes) {
+    const byId = new Map(addonNodes.map((n) => [n.id, n]));
+    const entries = new Map();
+
+    for (const route of routes) {
+      if (!route.viaId || !byId.has(route.viaId)) continue;
+      const entry = entries.get(route.viaId) || { node: byId.get(route.viaId), hostnames: [], vpn: false };
+      if (!entry.hostnames.includes(route.hostname)) entry.hostnames.push(route.hostname);
+      entries.set(route.viaId, entry);
+    }
+    for (const node of addonNodes) {
+      if (!(node.roles || []).some((role) => /VPN|Tailscale|WireGuard|OpenVPN/i.test(role))) continue;
+      const entry = entries.get(node.id) || { node, hostnames: [], vpn: false };
+      entry.vpn = true;
+      entries.set(node.id, entry);
+    }
+    if (!entries.size) return { nodes: [], edges: [] };
+
+    const total = [...entries.values()].reduce((sum, e) => sum + e.hostnames.length, 0);
+    const internet = {
+      id: "internet",
+      kind: "internet",
+      tier: "remote",
+      label: "Internet",
+      icon: "cloud-outline",
+      r: 44,
+      badge: "OUTSIDE",
+      notes: [
+        `${entries.size} way${entries.size === 1 ? "" : "s"} in from outside`,
+        total ? `${total} public hostname${total === 1 ? "" : "s"}` : null,
+      ].filter(Boolean),
+    };
+
+    const edges = [...entries.values()].map(({ node, hostnames, vpn }) => [
+      "internet",
+      node.id,
+      { label: hostnames.length ? `${hostnames.length} hostname${hostnames.length === 1 ? "" : "s"}` : "VPN" },
+    ]);
+    return { nodes: [internet], edges };
   }
 
   _hostNode(routes) {
@@ -2034,6 +2109,8 @@ class SystemMapCard extends HTMLElement {
       icon: "chip",
       r: 62,
       exposedUrl: external ? `https://${external.hostname}` : null,
+      hostname: external?.hostname || null,
+      badge: external?.hostname || null,
       notes: [
         this._system.core?.version ? `Home Assistant Core ${this._system.core.version}` : null,
         this._system.os?.board ? `on ${this._system.os.board}` : null,
@@ -2500,7 +2577,9 @@ class SystemMapCard extends HTMLElement {
     let sub = "";
     if (n.kind === "host") status = "host";
     else if (n.kind === "hardware") status = "hardware";
-    else if (n.kind === "share") {
+    else if (n.kind === "internet") {
+      status = "internet";
+    } else if (n.kind === "share") {
       // A share is only up while the add-on exporting it is, so it takes
       // that add-on's state rather than looking permanently unknown.
       status = addonStatus(this._findAddon(n.servedBy));
@@ -2537,6 +2616,10 @@ class SystemMapCard extends HTMLElement {
       const shown = names.slice(0, 2).join(", ");
       sub = `used by ${shown}${names.length > 2 ? ` +${names.length - 2}` : ""}`;
     }
+
+    // A public hostname is the single most useful thing to know about a node
+    // at a glance, so it outranks the counts.
+    if (n.hostname) sub = n.hostname;
 
     // A problem outranks whatever the sub-label was going to say - the whole
     // point of the join is that it's visible without clicking.
@@ -2590,7 +2673,7 @@ class SystemMapCard extends HTMLElement {
     const boxes = {};
     for (const n of visible) {
       const b = boxes[n.tier] || (boxes[n.tier] = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
-      const topPad = n.badge ? n.r + 30 : n.r + 16;
+      const topPad = n.badge ? n.r + 32 : n.r + 16;
       const bottomPad = n.r + 40; // label + sub-label now render below the circle, not inside it
       b.minX = Math.min(b.minX, n.x - n.r - 16);
       b.maxX = Math.max(b.maxX, n.x + n.r + 16);
@@ -2636,7 +2719,10 @@ class SystemMapCard extends HTMLElement {
         this._nodePositions.set(`node:${n.id}`, { x: n.x, y: n.y, r: n.r });
         const isHi = !!this._highlight?.has(`node:${n.id}`);
         const cls =
-          "smc-node" + (problem ? " smc-problem" : "") + (dimming ? (isHi ? " smc-hi" : " smc-dim") : "");
+          "smc-node" +
+          (n.kind === "internet" ? " smc-internet" : "") +
+          (problem ? " smc-problem" : "") +
+          (dimming ? (isHi ? " smc-hi" : " smc-dim") : "");
         const iconPath = n.icon ? ICON_PATHS[n.icon] : null;
         const iconSize = n.r * 1.15;
         const iconSvg = iconPath
@@ -3087,6 +3173,12 @@ class SystemMapCard extends HTMLElement {
           .sort((a, b) => (parseDate(b.date) || 0) - (parseDate(a.date) || 0))
           .slice(0, 8)
           .map((b) => [b.name || b.slug, `${new Date(parseDate(b.date)).toLocaleString()} - ${formatBytes((b.size || 0) * 1024 * 1024) || ""}`]);
+      }
+      if (key === "exposed") {
+        rows = (this._routes || []).map((r) => [
+          r.hostname,
+          `→ ${escapeHtml(this._derived.nodes.find((n) => n.id === r.targetId)?.label || "unresolved")} (${escapeHtml(r.service)})`,
+        ]);
       }
       if (key === "internet") {
         rows = (this._system.network?.interfaces || []).map((i) => [
