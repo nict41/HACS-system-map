@@ -56,8 +56,15 @@
 // to that source entity first, generically, by following `options.entity_id`
 // on the entity's owning config entry - not hardcoded to switch_as_x by
 // name, so it should also work for any other integration following the same
-// convention. Anything that doesn't resolve to a known platform reports
-// "not modeled on this map" rather than guessing.
+// convention. Every config entry is now on the map either way: a platform
+// with no curated node falls back to the entity's own config entry, and
+// every config entry is drawn as a node in the auto-generated "Integrations"
+// grid. So "isn't modeled as a node on this map" - which any entity outside
+// the hand-written PLATFORM_TO_NODES table used to hit, camera.* served by
+// MJPEG among them - is no longer a reachable answer for an entity backed by
+// a config entry. The one honest remaining miss is an entity from a
+// YAML-configured platform that has no config entry at all, which the finder
+// reports as exactly that rather than guessing.
 //
 // Install: Settings -> Dashboards -> (three dots) -> Resources -> Add
 // resource, URL `/local/system-map-card.js` (bump `?v=` on the URL after
@@ -224,8 +231,14 @@ const HOST_STATS = [
   { key: "disk", label: "Disk (/config)", entity: "sensor.disk_use_percent_config", suffix: "%" },
 ];
 
-// Entity registry `platform` -> hub node id(s). Deliberately small and
-// explicit - see file header on why this can't be inferred generically.
+// Entity registry `platform` -> curated hub node id(s). Deliberately small
+// and explicit, and now only an *override*: it exists for platforms whose
+// real owner on this map is a hand-placed node rather than their own
+// integration tile (an `mqtt` entity is really served by the Zigbee2MQTT and
+// Mosquitto add-ons, not by the "MQTT" config entry). Anything not listed
+// here resolves generically, through the entity's config entry, to that
+// entry's node in the auto-generated Integrations grid - so no entry ever
+// needs adding here just to stop the finder saying "not modeled".
 const PLATFORM_TO_NODES = {
   mqtt: ["zigbee2mqtt", "mosquitto"],
   zha: ["zha"],
@@ -303,6 +316,12 @@ function formatNetwork(network) {
 // this is what keeps the map from ever "missing" something again as
 // add-ons come and go, without hand-placing coordinates for each one.
 const OTHER_GRID = { cols: 8, spacingX: 140, spacingY: 108, r: 30, marginX: 90, topPad: 55, bottomPad: 40 };
+// Deliberately denser than the add-on grid: there are roughly ten times as
+// many config entries as leftover add-ons, and at the add-on grid's spacing
+// they alone would stretch the map tall enough to make fit-to-view useless.
+const ENTRY_GRID = { cols: 10, spacingX: 112, spacingY: 84, r: 22, marginX: 80, topPad: 52, bottomPad: 40 };
+const ENTRY_GRID_COLOR = "#5c6bc0"; // indigo - distinct from the four tiers and the add-on grid
+const GRID_START_Y = 1180; // first auto-grid sits below the curated layout
 
 class SystemMapCard extends HTMLElement {
   setConfig(config) {
@@ -320,7 +339,15 @@ class SystemMapCard extends HTMLElement {
     this._addonInfoCache = new Map();
     this._viewBox = null; // current pan/zoom state, {x,y,w,h} in SVG user units
     this._naturalViewBox = null; // full-fit viewBox, recomputed each render
-    this._highlight = null; // Set of node ids highlighted by the entity finder, or null
+    // Set of namespaced keys highlighted by the entity finder, or null:
+    // "node:<id>" | "addon:<slug>" | "entry:<entry_id>". Namespaced because a
+    // highlight can land on a curated node, an auto-grid add-on, or an
+    // auto-grid integration, and those three id spaces can collide.
+    this._highlight = null;
+    // key -> {x, y, r} for every node actually drawn, rebuilt on each graph
+    // render. Used to pan the view onto a highlight, and to tell "highlighted
+    // but off-screen" apart from "highlighted but filtered out of the map".
+    this._nodePositions = new Map();
     try {
       this._hideInactive = localStorage.getItem("smc-hide-inactive") === "1";
     } catch (_) {
@@ -392,7 +419,7 @@ class SystemMapCard extends HTMLElement {
         </div>
         <div class="smc-lists">
           <div class="smc-col">
-            <h3>Integrations <span class="smc-count" data-count="integrations"></span></h3>
+            <h3>Integrations <span class="smc-count" data-count="integrations"></span> <span class="smc-hint">- every one is also a node on the map above</span></h3>
             <div class="smc-chips" data-list="integrations"></div>
           </div>
         </div>
@@ -451,6 +478,8 @@ class SystemMapCard extends HTMLElement {
         .smc-chips { max-height: 160px; overflow-y: auto; display: flex; flex-wrap: wrap; gap: 6px; padding-right: 4px; }
         .smc-chip { display: inline-flex; align-items: center; gap: 5px; padding: 4px 9px; border-radius: 12px; background: var(--card-background-color, #eee); font-size: 0.82em; cursor: pointer; color: var(--primary-text-color); border: 1px solid var(--divider-color, transparent); }
         .smc-chip:hover { border-color: var(--primary-color); }
+        .smc-chip.smc-hi { border-color: #ffca28; box-shadow: 0 0 0 2px rgba(255, 202, 40, 0.55); }
+        .smc-chip.smc-dim { opacity: 0.35; }
         .smc-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
       </style>
     `;
@@ -486,6 +515,8 @@ class SystemMapCard extends HTMLElement {
       if (node) return this._openDetail("node", node.getAttribute("data-node"));
       const addonNode = ev.target.closest("[data-node-addon]");
       if (addonNode) return this._openDetail("addon", addonNode.getAttribute("data-node-addon"));
+      const entryNode = ev.target.closest("[data-node-entry]");
+      if (entryNode) return this._openDetail("entry", entryNode.getAttribute("data-node-entry"));
       const chip = ev.target.closest("[data-chip]");
       if (chip) return this._openDetail(chip.getAttribute("data-chip-kind"), chip.getAttribute("data-chip"));
       const close = ev.target.closest(".smc-detail-close");
@@ -741,23 +772,91 @@ class SystemMapCard extends HTMLElement {
       return;
     }
 
-    const nodeIds = PLATFORM_TO_NODES[last.reg.platform] || [];
-    if (!nodeIds.length) {
-      resultEl.textContent = `${chainDesc} is served by the "${last.reg.platform}" integration, which isn't modeled as a node on this map.`;
+    const target = this._mapTargetForRegistryEntry(last.reg);
+    if (!target) {
+      resultEl.textContent = `${chainDesc} is served by the "${last.reg.platform}" integration, which has no config entry on this instance (YAML-configured), so there's no node on the map to point at.`;
       this._clearHighlight(false);
       return;
     }
 
-    this._highlight = new Set(nodeIds);
-    const names = nodeIds.map((id) => HUB_LAYOUT.find((n) => n.id === id)?.label || id).join(", ");
-    resultEl.textContent = `${chainDesc} → highlighted: ${names}`;
+    this._highlight = new Set(target.keys);
+    resultEl.textContent = `${chainDesc} → highlighted: ${target.names.join(", ")}`;
+    this._renderHighlightables();
+
+    // A node can be resolved correctly and still not be drawn - the
+    // hide-inactive filter removes stopped add-ons and disabled/ignored
+    // integrations from the map. Saying so beats a highlight that silently
+    // lands on nothing.
+    const undrawn = [...this._highlight].filter((k) => !this._nodePositions.has(k));
+    if (undrawn.length) resultEl.textContent += ` - not currently drawn (hidden by the "Hide inactive" filter).`;
+    else this._panToHighlight();
+  }
+
+  // Where does a registry entry live on this map? Three routes, in order:
+  //   1. PLATFORM_TO_NODES - a curated node that is the entity's real owner
+  //      (mqtt -> the Zigbee2MQTT/Mosquitto add-ons, not the MQTT tile).
+  //   2. A curated `kind:"integration"` node for the entity's own domain.
+  //   3. The entity's own config entry, which is always drawn in the
+  //      auto-generated Integrations grid.
+  // Route 3 is what makes "isn't modeled on this map" unreachable for any
+  // entity backed by a config entry - previously anything outside the
+  // hand-written table (a camera served by MJPEG, say) fell off the end here.
+  _mapTargetForRegistryEntry(reg) {
+    const curated = PLATFORM_TO_NODES[reg.platform] || [];
+    if (curated.length) {
+      return {
+        keys: curated.map((id) => `node:${id}`),
+        names: curated.map((id) => HUB_LAYOUT.find((n) => n.id === id)?.label || id),
+      };
+    }
+
+    // `config_entry_id` is the authoritative link (it survives a platform
+    // whose domain differs from its entry's); the domain lookup is only a
+    // fallback for registry entries that don't carry one.
+    const entry =
+      (reg.config_entry_id && this._entries.find((e) => e.entry_id === reg.config_entry_id)) ||
+      this._findEntry(reg.platform) ||
+      null;
+
+    const curatedNode = HUB_LAYOUT.find((n) => n.kind === "integration" && n.domain === (entry?.domain || reg.platform));
+    if (curatedNode) return { keys: [`node:${curatedNode.id}`], names: [curatedNode.label] };
+
+    if (entry) {
+      const name = entry.title ? `${entry.domain}: ${entry.title}` : entry.domain;
+      return { keys: [`entry:${entry.entry_id}`], names: [`${name} (in the Integrations grid)`] };
+    }
+    return null;
+  }
+
+  // Centres the view on whatever is highlighted, keeping the current zoom.
+  // Without this, a highlight landing in the Integrations grid - well below
+  // the curated layout - is correct but off-screen, which is hard to tell
+  // apart from the finder having done nothing at all.
+  _panToHighlight() {
+    if (!this._highlight?.size || !this._viewBox) return;
+    const pts = [...this._highlight].map((k) => this._nodePositions.get(k)).filter(Boolean);
+    if (!pts.length) return;
+    const xs = pts.map((pt) => pt.x);
+    const ys = pts.map((pt) => pt.y);
+    const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
+    const cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+    this._viewBox.x = cx - this._viewBox.w / 2;
+    this._viewBox.y = cy - this._viewBox.h / 2;
+    this._applyViewBox();
+  }
+
+  // The two views a highlight can appear in. Deliberately not _renderAll():
+  // that would also re-run the detail panel, which can refetch add-on info
+  // over the WS API for no reason on a highlight change.
+  _renderHighlightables() {
     this._renderGraph();
+    this._renderChipList("integrations");
   }
 
   _clearHighlight(clearResultText = true) {
     this._highlight = null;
     if (clearResultText) this.querySelector(".smc-entity-result").textContent = "";
-    this._renderGraph();
+    this._renderHighlightables();
   }
 
   // --- data -------------------------------------------------------------
@@ -877,6 +976,7 @@ class SystemMapCard extends HTMLElement {
   // --- graph rendering ----------------------------------------------------
 
   _renderGraph() {
+    this._nodePositions = new Map();
     const hidden = new Set();
     if (this._hideInactive) {
       for (const n of HUB_LAYOUT) {
@@ -916,7 +1016,7 @@ class SystemMapCard extends HTMLElement {
         const from = HUB_LAYOUT.find((n) => n.id === fromId);
         const to = HUB_LAYOUT.find((n) => n.id === toId);
         if (!from || !to) return "";
-        const edgeHi = this._highlight && this._highlight.has(fromId) && this._highlight.has(toId);
+        const edgeHi = !!(this._highlight?.has(`node:${fromId}`) && this._highlight?.has(`node:${toId}`));
         const cls = "smc-edge" + (opts?.dashed ? " dashed" : "") + (dimming && !edgeHi ? " smc-dim" : "");
         const line = `<line class="${cls}" x1="${from.x}" y1="${from.y}" x2="${to.x}" y2="${to.y}" />`;
         const label = opts?.label
@@ -930,7 +1030,8 @@ class SystemMapCard extends HTMLElement {
       .map((n) => {
         const { status, sub } = this._nodeState(n);
         const color = colorFor(status);
-        const isHi = this._highlight && this._highlight.has(n.id);
+        this._nodePositions.set(`node:${n.id}`, { x: n.x, y: n.y, r: n.r });
+        const isHi = !!this._highlight?.has(`node:${n.id}`);
         const cls = "smc-node" + (dimming ? (isHi ? " smc-hi" : " smc-dim") : "");
         const iconPath = n.icon ? ICON_PATHS[n.icon] : null;
         const iconSize = n.r * 1.15;
@@ -948,43 +1049,54 @@ class SystemMapCard extends HTMLElement {
       })
       .join("");
 
-    // Everything not already pinned above, auto-laid-out in a grid - this
-    // is what guarantees nothing is ever "missing" from the map again.
+    // Everything not already pinned above, auto-laid-out in grids below the
+    // curated layout - this is what guarantees nothing is ever "missing"
+    // from the map. Leftover add-ons first, then *every* config entry, so
+    // each integration has a real node the entity finder can point at
+    // instead of reporting it as unmodeled.
     const pinnedSlugs = new Set(HUB_LAYOUT.filter((n) => n.kind === "addon").map((n) => n.slug));
     let otherAddons = this._addons.filter((a) => !pinnedSlugs.has(a.slug));
     if (this._hideInactive) otherAddons = otherAddons.filter((a) => !isInactiveStatus(addonStatus(a)));
-    otherAddons = [...otherAddons].sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+    const addonItems = [...otherAddons]
+      .sort((a, b) => (a.name || "").localeCompare(b.name || ""))
+      .map((a) => ({ kind: "addon", key: a.slug, label: a.name, color: colorFor(addonStatus(a)) }));
 
-    const gridStartY = 1180;
-    const { cols, spacingX, spacingY, r, marginX, topPad, bottomPad } = OTHER_GRID;
-    const rows = Math.ceil(otherAddons.length / cols);
-    const gridPositions = otherAddons.map((a, i) => ({
-      addon: a,
-      x: marginX + (i % cols) * spacingX,
-      y: gridStartY + topPad + Math.floor(i / cols) * spacingY,
+    const pinnedDomains = new Set(HUB_LAYOUT.filter((n) => n.kind === "integration").map((n) => n.domain));
+    let otherEntries = this._entries.filter((e) => !pinnedDomains.has(e.domain));
+    if (this._hideInactive) otherEntries = otherEntries.filter((e) => !isInactiveStatus(entryStatus(e)));
+    otherEntries = [...otherEntries].sort((a, b) => (a.domain || "").localeCompare(b.domain || ""));
+    // The domain alone is the more identifying label on a small circle, so
+    // that's the default; two entries of the same domain (two MQTT brokers,
+    // two cameras) would draw as identical circles though, so those - and
+    // only those - get their title appended to tell them apart.
+    const domainCounts = otherEntries.reduce((m, e) => m.set(e.domain, (m.get(e.domain) || 0) + 1), new Map());
+    const entryItems = otherEntries.map((e) => ({
+      kind: "entry",
+      key: e.entry_id,
+      label: domainCounts.get(e.domain) > 1 && e.title ? `${e.domain}: ${e.title}` : e.domain,
+      color: colorFor(entryStatus(e)),
     }));
-    const gridBoxSvg = gridPositions.length
-      ? (() => {
-          const minX = Math.min(...gridPositions.map((p) => p.x)) - r - 16;
-          const maxX = Math.max(...gridPositions.map((p) => p.x)) + r + 16;
-          const minY = gridStartY + topPad - r - 16;
-          const maxY = Math.max(...gridPositions.map((p) => p.y)) + r + 16;
-          return (
-            `<rect class="smc-tier-box" x="${minX}" y="${minY}" width="${maxX - minX}" height="${maxY - minY}" rx="14" style="fill:${OTHER_GRID_COLOR};fill-opacity:0.08;stroke:${OTHER_GRID_COLOR};stroke-opacity:0.5;" />` +
-            `<text class="smc-tier-label" x="${minX + 4}" y="${minY - 10}" style="fill:${OTHER_GRID_COLOR}">Other add-ons &amp; tools</text>`
-          );
-        })()
-      : "";
-    const gridSvg = gridPositions
-      .map(
-        ({ addon, x, y }) => `
-          <g class="smc-node smc-node-small${dimming ? " smc-dim" : ""}" data-node-addon="${escapeHtml(addon.slug)}">
-            <circle cx="${x}" cy="${y}" r="${r}" fill="${colorFor(addonStatus(addon))}" />
-            <text x="${x}" y="${y + 3}">${escapeHtml(truncate(addon.name, 15))}</text>
-          </g>`
-      )
-      .join("");
-    const totalHeight = gridPositions.length ? gridStartY + topPad + rows * spacingY + bottomPad : gridStartY - 40;
+
+    const addonGrid = this._gridSection({
+      items: addonItems,
+      startY: GRID_START_Y,
+      geom: OTHER_GRID,
+      color: OTHER_GRID_COLOR,
+      label: "Other add-ons & tools",
+      dataAttr: "data-node-addon",
+      dimming,
+    });
+    const entryGrid = this._gridSection({
+      items: entryItems,
+      startY: GRID_START_Y + addonGrid.height,
+      geom: ENTRY_GRID,
+      color: ENTRY_GRID_COLOR,
+      label: "Integrations (every config entry)",
+      dataAttr: "data-node-entry",
+      dimming,
+    });
+    const gridsHeight = addonGrid.height + entryGrid.height;
+    const totalHeight = gridsHeight ? GRID_START_Y + gridsHeight : GRID_START_Y - 40;
 
     const natural = { x: 0, y: 0, w: 1220, h: totalHeight };
     this._naturalViewBox = natural;
@@ -993,32 +1105,85 @@ class SystemMapCard extends HTMLElement {
     this.querySelector(".smc-graph").innerHTML = `
       <svg viewBox="${this._viewBox.x} ${this._viewBox.y} ${this._viewBox.w} ${this._viewBox.h}" xmlns="http://www.w3.org/2000/svg">
         ${boxesSvg}
-        ${gridBoxSvg}
         ${tierLabelsSvg}
         ${edgesSvg}
         ${nodesSvg}
-        ${gridSvg}
+        ${addonGrid.svg}
+        ${entryGrid.svg}
       </svg>`;
   }
 
+  // One auto-laid-out grid section: a bounding box, a label, and a circle
+  // per item. Shared by the leftover-add-ons and the integrations grids so
+  // both get identical highlight/dim behaviour and neither can drift.
+  // Returns its own rendered height so the next section can stack under it.
+  _gridSection({ items, startY, geom, color, label, dataAttr, dimming }) {
+    if (!items.length) return { svg: "", height: 0 };
+    const { cols, spacingX, spacingY, r, marginX, topPad, bottomPad } = geom;
+    const positions = items.map((item, i) => ({
+      item,
+      x: marginX + (i % cols) * spacingX,
+      y: startY + topPad + Math.floor(i / cols) * spacingY,
+    }));
+    const rows = Math.ceil(items.length / cols);
+    const minX = Math.min(...positions.map((pos) => pos.x)) - r - 16;
+    const maxX = Math.max(...positions.map((pos) => pos.x)) + r + 16;
+    const minY = startY + topPad - r - 16;
+    const maxY = Math.max(...positions.map((pos) => pos.y)) + r + 16;
+
+    const boxSvg =
+      `<rect class="smc-tier-box" x="${minX}" y="${minY}" width="${maxX - minX}" height="${maxY - minY}" rx="14" style="fill:${color};fill-opacity:0.08;stroke:${color};stroke-opacity:0.5;" />` +
+      `<text class="smc-tier-label" x="${minX + 4}" y="${minY - 10}" style="fill:${color}">${escapeHtml(label)}</text>`;
+
+    const nodesSvg = positions
+      .map(({ item, x, y }) => {
+        const key = `${item.kind}:${item.key}`;
+        this._nodePositions.set(key, { x, y, r });
+        const isHi = !!this._highlight?.has(key);
+        const cls = "smc-node smc-node-small" + (dimming ? (isHi ? " smc-hi" : " smc-dim") : "");
+        return `
+          <g class="${cls}" ${dataAttr}="${escapeHtml(item.key)}">
+            <circle cx="${x}" cy="${y}" r="${r}" fill="${item.color}" />
+            <text x="${x}" y="${y + 3}">${escapeHtml(truncate(item.label, 15))}</text>
+          </g>`;
+      })
+      .join("");
+
+    return { svg: boxSvg + nodesSvg, height: topPad + rows * spacingY + bottomPad };
+  }
+
   _renderChipList(kind) {
-    // Add-ons now live entirely in the graph above (curated nodes + the
-    // auto-grid), so only Integrations - too numerous (~80) to usefully
-    // render as graph nodes - keep the scrollable chip-list treatment.
+    // Integrations are drawn as graph nodes too (the auto-grid), but this
+    // list stays: it's the only place their full `domain: title` text is
+    // readable, where a 22px circle can only fit a truncated domain. Both
+    // views highlight together, so a finder result is legible either way.
     const wrap = this.querySelector(`[data-list="${kind}"]`);
     const countEl = this.querySelector(`[data-count="${kind}"]`);
     const all = [...this._entries].sort((a, b) => (a.domain || "").localeCompare(b.domain || ""));
     const shown = this._hideInactive ? all.filter((e) => !isInactiveStatus(entryStatus(e))) : all;
     countEl.textContent = shown.length === all.length ? `(${all.length})` : `(${shown.length} of ${all.length})`;
+    const dimming = !!this._highlight?.size;
     wrap.innerHTML = shown
       .map((e) => {
         const status = entryStatus(e);
         const label = e.title ? `${e.domain}: ${e.title}` : e.domain;
-        return `<span class="smc-chip" data-chip="${escapeHtml(e.entry_id)}" data-chip-kind="entry">
+        const isHi = !!this._highlight?.has(`entry:${e.entry_id}`);
+        const cls = "smc-chip" + (dimming ? (isHi ? " smc-hi" : " smc-dim") : "");
+        return `<span class="${cls}" data-chip="${escapeHtml(e.entry_id)}" data-chip-kind="entry">
           <span class="smc-dot" style="background:${colorFor(status)}"></span>${escapeHtml(label)}
         </span>`;
       })
       .join("");
+
+    // Scroll the highlighted chip into the middle of its own scroll box.
+    // Deliberately not scrollIntoView(): that walks every scrollable
+    // ancestor and would yank the whole dashboard around. Both elements
+    // share an offsetParent, so the offsetTop difference is the offset
+    // within this list.
+    const hiChip = wrap.querySelector(".smc-chip.smc-hi");
+    if (hiChip) {
+      wrap.scrollTop = Math.max(0, hiChip.offsetTop - wrap.offsetTop - wrap.clientHeight / 2 + hiChip.offsetHeight / 2);
+    }
   }
 
   _renderHostStats() {
