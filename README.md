@@ -1,5 +1,7 @@
 # System Map Card
 
+![The System Map card, showing the status bar, host stat tiles, the layered topology map with discovered hardware and problem rings, and the auto-generated add-on and integration grids](docs/screenshot.png)
+
 A Lovelace custom card that renders a live, layered topology **and health**
 map of a Home Assistant server: discovered physical hardware, which add-on
 owns each piece of hardware and why, LAN network infrastructure,
@@ -103,16 +105,41 @@ On a Container/Core install those sections fail their fetch individually and
 the rest of the card - the topology, the integration grids, the problem
 joins and the entity finder - carries on working.
 
-## Tests
+## Versioning
+
+Releases follow [semantic versioning](https://semver.org/) and are listed in
+[CHANGELOG.md](CHANGELOG.md). `VERSION` in `system-map-card.js` is the source
+of truth: it's shown in the card header, logged to the browser console on
+load, and CI refuses to publish a release whose tag disagrees with it.
+
+To cut a release: bump `VERSION`, add a `CHANGELOG.md` entry, then
 
 ```
-node test/system-map-card.test.mjs
+git tag v1.2.3 && git push origin v1.2.3
 ```
 
-No dependencies and no build step: the card is evaluated against a stubbed
-DOM, covering config defaulting, hardware discovery and its derived edges,
-the problem and count joins, the status-bar thresholds, and that every
-optional section can be switched off without taking the card down.
+The `Release` workflow checks the tag against `VERSION`, runs the tests, and
+creates the GitHub release. HACS installs from releases, so this is also what
+makes the update appear in HACS rather than needing a manual redownload.
+
+## Development
+
+```
+node test/system-map-card.test.mjs      # 58 assertions, no dependencies
+```
+
+No build step: the card is evaluated against a stubbed DOM, covering config
+defaulting, hardware discovery and its derived edges, the problem and count
+joins, the status-bar thresholds, the emitted markup, and that every optional
+section can be switched off without taking the card down.
+
+To regenerate the screenshot above against fixture data:
+
+```
+npm install --no-save playwright
+npx playwright install chromium   # or set PLAYWRIGHT_CHROMIUM_PATH
+node tools/screenshot.mjs
+```
 
 ## Install via HACS
 

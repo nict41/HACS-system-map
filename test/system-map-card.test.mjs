@@ -272,6 +272,57 @@ T("sparklinePath maps a flat series to a flat line",
 T("findPathInOptions ignores an unrelated option",
   ctx.findPathInOptions({ mqtt: { server: "mqtt://core" } }, ["/dev/ttyUSB0"]), null);
 
+// --- config changes apply live ---------------------------------------------
+// Regression: every option inside a *named* ha-form expandable was written to
+// config.<section>.<option>, which setConfig never reads - the form worked
+// and the card never changed. ha-form only merges a section's values into the
+// parent when the item has no name (or flatten: true).
+T("no expandable section nests its values under a name",
+  (ctx.EDITOR_SCHEMA || [])
+    .filter((f) => f.type === "expandable")
+    .filter((f) => f.name || f.flatten !== true)
+    .map((f) => f.title || f.name),
+  []);
+T("every expandable still has a header title",
+  (ctx.EDITOR_SCHEMA || []).filter((f) => f.type === "expandable" && !f.title).length, 0);
+
+T("a changed option re-renders from data in hand, without refetching",
+  (() => {
+    const live = newCard();
+    live._loaded = true;
+    let refetched = false;
+    live._refreshData = () => { refetched = true; };
+    live._build = function () { this._builtWith = this._config.show_legend; };
+    live.setConfig({ type: "custom:system-map-card", show_legend: false });
+    return [live._config.show_legend, live._built, live._builtWith, refetched];
+  })(),
+  [false, true, false, false]);
+
+T("turning on a join whose data was never fetched does refetch once",
+  (() => {
+    const off = newCard({ discover_hardware: false });
+    off._loaded = true;
+    off._hardware = null;
+    let refetches = 0;
+    off._refreshData = () => { refetches += 1; };
+    off._build = () => {};
+    off.setConfig({ type: "custom:system-map-card", discover_hardware: true });
+    off.setConfig({ type: "custom:system-map-card", discover_hardware: true, title: "typing" });
+    off._loadErrors.hardware = "no supervisor"; // a failed fetch must not retry forever
+    off.setConfig({ type: "custom:system-map-card", discover_hardware: true, title: "typing more" });
+    return refetches;
+  })(), 2);
+
+T("a config change keeps the fetched data",
+  (() => {
+    const live = newCard();
+    live._loaded = true;
+    live._build = () => {};
+    const before = live._addons.length;
+    live.setConfig({ type: "custom:system-map-card", title: "Renamed" });
+    return [before, live._addons.length, live._entries.length];
+  })(), [4, 4, 4]);
+
 // --- editor ----------------------------------------------------------------
 const editor = new SystemMapCardEditor();
 let emitted = null;

@@ -112,6 +112,18 @@
 // `type: custom:system-map-card`. To make it fill an entire dashboard, put
 // it as the only card on a view with View type "Panel".
 
+// Bumped with every release and checked against the git tag by CI, so a
+// version in the console is always the version of the file that's running -
+// which is the first thing worth knowing when a dashboard misbehaves after
+// an update, and the quickest way to catch a stale browser cache.
+const VERSION = "1.0.0";
+
+console.info(
+  `%c SYSTEM-MAP-CARD %c v${VERSION} `,
+  "color: white; background: #3f51b5; font-weight: 700;",
+  "color: #3f51b5; background: white; font-weight: 700;"
+);
+
 const escapeHtml = (value) =>
   String(value ?? "").replace(/[&<>"']/g, (c) => ({
     "&": "&amp;",
@@ -425,8 +437,19 @@ const EDITOR_SCHEMA = [
     ],
   },
   {
+    // name MUST stay empty and flatten MUST stay true on every expandable
+    // here. ha-form nests a named section's values under that name - a
+    // toggle inside `name: "sections"` is written to
+    // config.sections.show_status_bar, which setConfig never looks at, so
+    // the form appears to work and changes nothing. Empty name is the
+    // long-standing way to flatten (getValue returns the whole data object
+    // when a schema item has no name); `flatten: true` is the explicit
+    // modern spelling. Both are set so this holds on either. The header text
+    // comes from `title`, since with no name there's nothing to label.
     type: "expandable",
-    name: "sections",
+    name: "",
+    flatten: true,
+    title: "Sections & tiers",
     icon: "mdi:view-dashboard-outline",
     schema: [
       {
@@ -462,7 +485,9 @@ const EDITOR_SCHEMA = [
   },
   {
     type: "expandable",
-    name: "data",
+    name: "",
+    flatten: true,
+    title: "Live data & joins",
     icon: "mdi:database-search-outline",
     schema: [
       {
@@ -482,7 +507,9 @@ const EDITOR_SCHEMA = [
   },
   {
     type: "expandable",
-    name: "host_stats",
+    name: "",
+    flatten: true,
+    title: "Host stat entities (leave empty to auto-detect)",
     icon: "mdi:speedometer",
     schema: [
       { name: "cpu_entity", selector: { entity: { domain: ["sensor"] } } },
@@ -499,9 +526,6 @@ const EDITOR_LABELS = {
   title: "Title",
   graph_height: "Map height",
   refresh_interval: "Refresh every (0 = off)",
-  sections: "Sections & tiers",
-  data: "Live data & joins",
-  host_stats: "Host stat entities (leave empty to auto-detect)",
   hide_inactive: "Hide inactive by default",
   show_status_bar: "Status bar",
   show_host_stats: "Host stats",
@@ -619,6 +643,7 @@ class SystemMapCard extends HTMLElement {
   }
 
   setConfig(config) {
+    const first = !this._config;
     // A null/absent option must fall back to its default rather than
     // disabling the feature - ha-form writes `undefined` into a key when a
     // boolean is toggled back off in some HA versions, and an entity picker
@@ -629,7 +654,13 @@ class SystemMapCard extends HTMLElement {
       if (this._config[k] === undefined || this._config[k] === null) this._config[k] = v;
     }
     if (!Array.isArray(this._config.tiers) || !this._config.tiers.length) this._config.tiers = DEFAULTS.tiers;
+
+    // Section toggles change the markup and tier/hardware changes change the
+    // map's extent, so both always need redoing; the fetched data does not.
     this._built = false;
+    this._viewBox = null;
+    if (!first) return this._applyConfig();
+
     this._loaded = false;
     this._addons = [];
     this._entries = [];
@@ -651,7 +682,6 @@ class SystemMapCard extends HTMLElement {
     this._counts = new Map(); // node key -> {devices, entities, areas}
     this._history = {}; // stat key -> [values] for the sparklines
     this._refreshTimer = null;
-    this._viewBox = null; // current pan/zoom state, {x,y,w,h} in SVG user units
     this._naturalViewBox = null; // full-fit viewBox, recomputed each render
     // Set of namespaced keys highlighted by the entity finder, or null:
     // "node:<id>" | "addon:<slug>" | "entry:<entry_id>". Namespaced because a
@@ -667,6 +697,40 @@ class SystemMapCard extends HTMLElement {
     } catch (_) {
       this._hideInactive = false;
     }
+  }
+
+  // Re-applies a changed config to data we already have. Deliberately does
+  // NOT refetch: the visual editor calls setConfig on every keystroke in the
+  // title field, and a dozen API calls per character is not a preview. Only
+  // the three config-dependent indices are rebuilt, all from data in memory.
+  _applyConfig() {
+    if (!this._hass) return; // not mounted yet; `set hass` will build it
+    this._build();
+    this._built = true;
+
+    // Turning a join on for the first time can need data that was never
+    // fetched. Keyed on the data actually being absent (and not having
+    // already failed), so this fires once on the toggle rather than on every
+    // subsequent keystroke.
+    const missing =
+      ((this._config.highlight_problems || this._config.show_counts) && !this._entityRegistry.length && !this._loadErrors.entities) ||
+      (this._config.discover_hardware && !this._hardware && !this._loadErrors.hardware);
+    if (this._loaded && missing) return void this._refreshData();
+
+    this._deriveHardware();
+    this._buildProblemIndex();
+    this._buildCounts();
+    try {
+      this._renderAll();
+    } catch (e) {
+      console.error("system-map-card: render failed", e);
+      this._loadErrors.render = describeError(e);
+      this._renderErrors();
+    }
+    const loadingEl = this.querySelector(".smc-loading");
+    if (loadingEl) loadingEl.hidden = this._loaded;
+    if (this._config.show_sparklines && !Object.keys(this._history).length) this._loadHistory();
+    this._scheduleRefresh();
   }
 
   set hass(hass) {
@@ -710,6 +774,7 @@ class SystemMapCard extends HTMLElement {
             <input type="checkbox" class="smc-hide-inactive" />
             Hide inactive
           </label>
+          <span class="smc-version" title="System Map Card version">v${VERSION}</span>
           <button class="smc-refresh" title="Refresh">&#8635;</button>
         </div>
         <div class="smc-errors" hidden></div>
@@ -749,6 +814,7 @@ class SystemMapCard extends HTMLElement {
         .smc-header { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; flex: 0 0 auto; }
         .smc-title { font-size: 1.2em; font-weight: 500; color: var(--primary-text-color); flex: 1; }
         .smc-filter { display: flex; align-items: center; gap: 4px; font-size: 0.85em; color: var(--secondary-text-color); cursor: pointer; user-select: none; }
+        .smc-version { font-size: 0.72em; color: var(--secondary-text-color); opacity: 0.7; letter-spacing: 0.3px; }
         .smc-refresh { background: none; border: none; font-size: 1.3em; cursor: pointer; color: var(--secondary-text-color); line-height: 1; padding: 4px 8px; }
         .smc-refresh:hover { color: var(--primary-text-color); }
         .smc-errors { background: var(--error-color, #db4437); color: white; border-radius: 6px; padding: 6px 10px; font-size: 0.85em; margin-bottom: 8px; flex: 0 0 auto; }
