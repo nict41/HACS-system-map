@@ -45,8 +45,14 @@ a count.
   Health data land on the node for their domain
 - **Discovered hardware**: drives and serial devices come from Supervisor's
   `/hardware/info`, and ownership edges are derived by finding the device's
-  by-id path or mount point in an add-on's own options - the edge is
-  labelled with the option that matched, e.g. `owns (serial.port)`
+  by-id path, mount point *or filesystem label* in an add-on's own options -
+  the edge is labelled with the option that matched, e.g. `owns
+  (serial.port)` or `serves (moredisks)`
+- **Re-published shares are followed**: where one add-on mounts a disk and
+  serves it over SMB (detected from its published ports, not its name), the
+  other add-ons referencing that disk are drawn downstream of the *share*
+  rather than hanging off the hardware - which is the dependency that
+  actually breaks when that add-on stops
 - **Live resource use**: per-add-on CPU, memory, network and disk I/O in the
   detail panel, fetched on click; optional log tail alongside it
 - **Counts**: devices, entities and areas per node, from the registries

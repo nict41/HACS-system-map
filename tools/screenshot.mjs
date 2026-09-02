@@ -102,6 +102,7 @@ const page = `<!doctype html><html><head><meta charset="utf-8"><style>
 </style></head><body><div id="host"></div>
 <script>${cardSource}</script>
 <script>
+  const ADDONS = ${JSON.stringify(ADDONS)};
   const RESPONSES = ${JSON.stringify(RESPONSES)};
   const ENTRIES = ${JSON.stringify(ENTRIES)};
   const ENTITIES = ${JSON.stringify(ENTITIES)};
@@ -115,10 +116,18 @@ const page = `<!doctype html><html><head><meta charset="utf-8"><style>
           if (msg.endpoint in RESPONSES) return { data: RESPONSES[msg.endpoint] };
           if (msg.endpoint.endsWith("/info")) {
             const slug = msg.endpoint.split("/")[2];
-            const options = slug.includes("zigbee")
-              ? { serial: { port: RESPONSES["/hardware/info"].devices[0].by_id } }
-              : slug.includes("samba") ? { media_dirs: ["/media/NAS1"] } : {};
-            return { data: { name: slug, state: "started", version: "1.4.2", options } };
+            // Samba mounts the drive by label and publishes it on 445; Immich
+            // and Kiwix reach the same disk through that share. Fixtured this
+            // way so the screenshot shows the republish chain, which is the
+            // part of the derivation that is hardest to describe in words.
+            const ADDON_OPTIONS = {
+              "45df7312_zigbee2mqtt": { options: { serial: { port: RESPONSES["/hardware/info"].devices[0].by_id } } },
+              c9a35110_sambanas: { network: { "445/tcp": 445, "139/tcp": 139 }, options: { workgroup: "WORKGROUP", moredisks: ["NAS1"] } },
+              "3b88f413_immich": { options: { external_library: "/media/NAS1/photos" } },
+              beb500c8_kiwix: { options: { zim_dir: "NAS1" } },
+            };
+            const name = (ADDONS.find((a) => a.slug === slug) || {}).name || slug;
+            return { data: { name, state: "started", version: "1.4.2", options: {}, ...(ADDON_OPTIONS[slug] || {}) } };
           }
           throw new Error("no fixture for " + msg.endpoint);
         }

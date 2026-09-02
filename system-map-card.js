@@ -116,7 +116,7 @@
 // version in the console is always the version of the file that's running -
 // which is the first thing worth knowing when a dashboard misbehaves after
 // an update, and the quickest way to catch a stale browser cache.
-const VERSION = "1.0.0";
+const VERSION = "1.1.0";
 
 console.info(
   `%c SYSTEM-MAP-CARD %c v${VERSION} `,
@@ -598,25 +598,53 @@ function prettySerialName(device) {
   return trimmed || device.dev_path || "Serial device";
 }
 
-// Walks an add-on's options looking for any of `paths` inside a string value,
-// and returns the option key that matched. Recursive because options nest
-// (Zigbee2MQTT keeps its adapter under `serial.port`), and a substring test
-// rather than equality because add-ons often store a path with a suffix or
-// inside a longer device string.
-function findPathInOptions(options, paths, prefix = "") {
-  if (!options || typeof options !== "object" || !paths?.length) return null;
+// Walks an add-on's options looking for a reference to `device`, and returns
+// {option, matched} - the option key that matched and the exact string it
+// matched on. Recursive because options nest (Zigbee2MQTT keeps its adapter
+// under `serial.port`, Samba its disks under `moredisks`).
+function findDeviceInOptions(options, device, prefix = "") {
+  if (!options || typeof options !== "object") return null;
   for (const [key, value] of Object.entries(options)) {
-    const label = prefix ? `${prefix}.${key}` : key;
-    if (typeof value === "string") {
-      if (paths.some((path) => path && value.includes(path))) return label;
-    } else if (Array.isArray(value)) {
-      if (value.some((v) => typeof v === "string" && paths.some((path) => path && v.includes(path)))) return label;
+    const option = prefix ? `${prefix}.${key}` : key;
+    const strings =
+      typeof value === "string" ? [value] : Array.isArray(value) ? value.filter((v) => typeof v === "string") : null;
+    if (strings) {
+      for (const str of strings) {
+        const matched = matchDeviceValue(str, device);
+        if (matched) return { option, matched };
+      }
     } else if (value && typeof value === "object") {
-      const hit = findPathInOptions(value, paths, label);
+      const hit = findDeviceInOptions(value, device, option);
       if (hit) return hit;
     }
   }
   return null;
+}
+
+// Two kinds of reference need two kinds of match, and conflating them is
+// wrong in both directions:
+//   - A *path* is matched as a substring, because add-ons store device paths
+//     inside longer strings (a device spec with a suffix, a URI).
+//   - A *filesystem label* cannot be. Samba addresses disks by label, not
+//     path (`moredisks: ["NAS1"]`), and a substring test on a short label
+//     like "NAS1" or "MEDIA" would match half the options on the system. So
+//     a label has to *be* the option's value, or the last segment of a path
+//     it holds - which still catches both `NAS1` and `/media/NAS1`.
+function matchDeviceValue(value, device) {
+  const path = (device.paths || []).find((p) => p && value.includes(p));
+  if (path) return path;
+  const trimmed = String(value).trim().replace(/\/+$/, "");
+  const tail = trimmed.split("/").pop().toLowerCase();
+  const lower = trimmed.toLowerCase();
+  return (device.labels || []).find((l) => l.toLowerCase() === lower || l.toLowerCase() === tail) || null;
+}
+
+// An add-on publishing SMB is a file server, whatever it's called. Read off
+// its own published ports rather than its slug, so this holds for any Samba
+// add-on rather than the one this map was written against.
+const SMB_PORTS = ["445/tcp", "139/tcp"];
+function servesSmb(info) {
+  return !!info?.network && Object.keys(info.network).some((port) => SMB_PORTS.includes(port));
 }
 
 // Sparkline over a fixed box, normalised to its own min/max - these sit next
@@ -1755,16 +1783,21 @@ class SystemMapCard extends HTMLElement {
         id: `hw_tty_${slugify(d.by_id)}`,
         label: prettySerialName(d),
         icon: "usb-port",
+        labels: [],
         paths: [d.by_id, d.dev_path].filter(Boolean),
         detail: { Kind: "Serial / USB device", Path: d.dev_path, "By-id": d.by_id, Subsystem: d.subsystem },
       }));
 
     const disks = drives.map((d) => {
       const mounts = (d.filesystems || []).flatMap((fs) => fs.mount_points || []);
+      // Labels shorter than three characters are dropped: they match too
+      // much to be evidence of anything.
+      const labels = (d.filesystems || []).map((fs) => fs.name).filter((n) => n && n.length >= 3);
       return {
         id: `hw_drive_${slugify(d.id || d.serial || d.model || "drive")}`,
         label: [d.vendor, d.model].filter(Boolean).join(" ") || d.id || "Drive",
         icon: "harddisk",
+        labels,
         paths: [...mounts, ...(d.filesystems || []).map((fs) => fs.device).filter(Boolean)],
         detail: {
           Kind: "Drive",
@@ -1773,6 +1806,7 @@ class SystemMapCard extends HTMLElement {
           Bus: d.connection_bus,
           Removable: d.removable ? "yes" : "no",
           "Mounted at": mounts.join(", ") || "not mounted",
+          Label: labels.join(", "),
           Serial: d.serial,
         },
       };
@@ -1788,14 +1822,42 @@ class SystemMapCard extends HTMLElement {
     // Every discovered device is physically attached to the host, so that
     // edge is always true; the interesting one is which add-on claims it.
     const edges = nodes.map((n) => ["host", n.id, { label: n.icon === "harddisk" ? "disk" : "USB" }]);
+
+    const claims = [];
     for (const n of nodes) {
       for (const [slug, info] of this._addonInfoCache) {
         if (!info || info._error) continue;
-        const hit = findPathInOptions(info.options, n.paths);
-        if (!hit) continue;
-        const addonNode = HUB_LAYOUT.find((h) => h.kind === "addon" && h.slug === slug);
-        (n.usedBy = n.usedBy || []).push({ slug, name: info.name || slug, option: hit });
-        if (addonNode) edges.push([n.id, addonNode.id, { label: `owns (${hit})` }]);
+        const hit = findDeviceInOptions(info.options, n);
+        if (hit) claims.push({ node: n, slug, info, ...hit });
+      }
+    }
+
+    // Several add-ons referencing one disk is usually not several add-ons
+    // touching the hardware: it's one of them mounting the disk and serving
+    // it, and the rest reaching it over that share. Where a claimant is an
+    // SMB server (by its own published ports, not its name), the others are
+    // drawn downstream of *it* rather than hanging off the drive - which is
+    // what the dependency actually is, and what breaks if that add-on stops.
+    const nodeFor = (slug) => HUB_LAYOUT.find((h) => h.kind === "addon" && h.slug === slug);
+    for (const n of nodes) {
+      const forNode = claims.filter((c) => c.node === n);
+      const servers = forNode.filter((c) => servesSmb(c.info));
+      for (const claim of forNode) {
+        const isServer = servers.includes(claim);
+        const server = isServer ? null : servers.find((sv) => sv.slug !== claim.slug);
+        (n.usedBy = n.usedBy || []).push({
+          slug: claim.slug,
+          name: claim.info.name || claim.slug,
+          option: claim.option,
+          share: server ? server.matched : null,
+          via: server ? server.info.name || server.slug : null,
+        });
+
+        const target = nodeFor(claim.slug);
+        if (!target) continue;
+        const source = server ? nodeFor(server.slug) : null;
+        if (source) edges.push([source.id, target.id, { dashed: true, label: `SMB: ${server.matched}` }]);
+        else edges.push([n.id, target.id, { label: `${isServer ? "serves" : "owns"} (${claim.option})` }]);
       }
     }
 
@@ -1937,7 +1999,16 @@ class SystemMapCard extends HTMLElement {
         .filter(Boolean)
         .join(" · ");
     }
-    if (n.usedBy?.length) sub = `used by ${n.usedBy.map((u) => u.name).join(", ")}`;
+    if (n.usedBy?.length) {
+      // Only who actually mounts the device, and at most two of them: a disk
+      // republished over SMB can have half the add-on list downstream of it,
+      // and the full list under a 32px circle is a wall of overlapping text.
+      // The rest is in the detail panel.
+      const direct = n.usedBy.filter((u) => !u.via);
+      const names = (direct.length ? direct : n.usedBy).map((u) => u.name);
+      const shown = names.slice(0, 2).join(", ");
+      sub = `used by ${shown}${names.length > 2 ? ` +${names.length - 2}` : ""}`;
+    }
 
     // A problem outranks whatever the sub-label was going to say - the whole
     // point of the join is that it's visible without clicking.
@@ -2374,10 +2445,17 @@ class SystemMapCard extends HTMLElement {
         // hand-written description - plus whichever add-on's options were
         // found pointing at it, which is what drew its ownership edge.
         rows = Object.entries(n.detail || {}).map(([k, v]) => [k, v]);
-        if (n.usedBy?.length) {
-          rows.push(["Claimed by", n.usedBy.map((u) => `${u.name} (${u.option})`).join(", ")]);
-        } else {
-          rows.push(["Claimed by", "no add-on's options reference this device"]);
+        const direct = (n.usedBy || []).filter((u) => !u.via);
+        const downstream = (n.usedBy || []).filter((u) => u.via);
+        rows.push([
+          "Claimed by",
+          direct.length ? direct.map((u) => `${u.name} (${u.option})`).join(", ") : "no add-on's options reference this device",
+        ]);
+        if (downstream.length) {
+          rows.push([
+            "Reached over SMB",
+            downstream.map((u) => `${u.name} (via ${u.via}'s ${u.share} share)`).join(", "),
+          ]);
         }
       } else if (n.kind === "addon") {
         const info = await this._fetchAddonInfo(n.slug);

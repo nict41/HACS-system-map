@@ -105,9 +105,15 @@ function newCard(config = {}, opts = {}) {
     },
   };
   card._hardware = { devices: [DONGLE, ...(opts.extraDevices || [])], drives: [DRIVE] };
+  // Samba addresses the disk by its filesystem *label* (moredisks: [NAS1]),
+  // not by a path, and publishes it over SMB - so it is the mounter, and the
+  // add-ons that also reference NAS1 are reaching it through that share.
   card._addonInfoCache = new Map([
     ["45df7312_zigbee2mqtt", { name: "Zigbee2MQTT", options: { serial: { port: DONGLE.by_id }, mqtt: { server: "mqtt://core-mosquitto" } } }],
-    ["core_samba", { name: "Samba share", options: { workgroup: "WORKGROUP", media_dirs: ["/media/NAS1"] } }],
+    ["c9a35110_sambanas", { name: "Samba NAS", network: { "445/tcp": 445, "139/tcp": 139 }, options: { workgroup: "WORKGROUP", moredisks: ["NAS1"] } }],
+    ["3b88f413_immich", { name: "Immich", network: { "3001/tcp": 8080 }, options: { external_library: "/media/NAS1/photos" } }],
+    ["beb500c8_kiwix", { name: "Kiwix", options: { zim_dir: "NAS1" } }],
+    ...(opts.addonInfo || []),
   ]);
   card._system = {
     host: { hostname: "homeassistant", disk_total: 100, disk_free: 4.2, kernel: "6.6", boot_timestamp: (Date.now() - 3 * 864e5) * 1000 },
@@ -134,15 +140,65 @@ T("getStubConfig is the bare type", SystemMapCard.getStubConfig(), { type: "cust
 
 // --- hardware discovery ----------------------------------------------------
 T("a drive and a serial dongle become nodes", c._derived.nodes.map((n) => n.label), ["LITEON EP2", "ITead Sonoff Zigbee 3.0"]);
+T("a drive carries its filesystem labels", c._derived.nodes[0].labels, ["NAS1"]);
 T("no discovered node lands on top of the host",
   c._derived.nodes.some((n) => Math.abs(n.x - 610) < 60 && n.y === 150), false);
 T("ownership is derived from the add-on's own nested options",
-  c._derived.edges.filter((e) => e[0].startsWith("hw_")).map((e) => [e[1], e[2].label]),
+  c._derived.edges.filter((e) => e[0].startsWith("hw_tty")).map((e) => [e[1], e[2].label]),
   [["zigbee2mqtt", "owns (serial.port)"]]);
 T("every discovered device hangs off the host",
   c._derived.edges.filter((e) => e[0] === "host").length, 2);
-T("the drive records the add-on claiming its mount point",
-  c._derived.nodes.find((n) => n.id.startsWith("hw_drive")).usedBy.map((u) => u.option), ["media_dirs"]);
+// --- the Samba republish chain --------------------------------------------
+const drive = () => c._derived.nodes.find((n) => n.id.startsWith("hw_drive"));
+const edgeLabels = (from, to) =>
+  c._derived.edges.filter((e) => (!from || e[0] === from) && (!to || e[1] === to)).map((e) => e[2].label);
+
+T("a disk referenced by filesystem label, not path, is still matched",
+  drive().usedBy.find((u) => u.slug === "c9a35110_sambanas")?.option, "moredisks");
+T("the SMB server owns the drive",
+  edgeLabels(drive().id, "samba"), ["serves (moredisks)"]);
+T("consumers hang off the share, not the hardware",
+  [edgeLabels(drive().id, "immich"), edgeLabels("samba", "immich")], [[], ["SMB: NAS1"]]);
+T("a consumer referencing the bare label resolves the same way",
+  edgeLabels("samba", "kiwix"), ["SMB: NAS1"]);
+T("the drive detail separates who mounts it from who reaches it over SMB",
+  drive().usedBy.map((u) => [u.name, u.via, u.share]),
+  [["Samba NAS", null, null], ["Immich", "Samba NAS", "NAS1"], ["Kiwix", "Samba NAS", "NAS1"]]);
+T("a serial device with one claimant is still a direct owns edge",
+  edgeLabels(c._derived.nodes.find((n) => n.id.startsWith("hw_tty")).id, "zigbee2mqtt"), ["owns (serial.port)"]);
+
+// Without an SMB server in the picture, every claimant goes back to hanging
+// off the drive directly - the old behaviour, unchanged.
+T("no SMB server means direct edges for everyone",
+  (() => {
+    const plain = newCard();
+    plain._addonInfoCache.set("c9a35110_sambanas", { name: "Samba NAS", options: { moredisks: ["NAS1"] } });
+    plain._deriveHardware();
+    const d = plain._derived.nodes.find((n) => n.id.startsWith("hw_drive"));
+    return plain._derived.edges.filter((e) => e[0] === d.id).map((e) => e[2].label).sort();
+  })(),
+  ["owns (external_library)", "owns (moredisks)", "owns (zim_dir)"]);
+
+// The length filter is applied where labels are built, not in the matcher,
+// so assert it there: a two-character volume name matches too much to be
+// evidence and never becomes a label at all.
+T("a filesystem label under three characters is discarded",
+  (() => {
+    const short = newCard();
+    short._hardware = { devices: [], drives: [{ ...DRIVE, filesystems: [{ device: "/dev/sda1", name: "OK", mount_points: [] }] }] };
+    short._deriveHardware();
+    return short._derived.nodes[0].labels;
+  })(), []);
+T("a label must be the value or a path's last segment, not a substring",
+  [
+    ctx.matchDeviceValue("NAS1", { labels: ["NAS1"], paths: [] }),
+    ctx.matchDeviceValue("/media/NAS1/photos", { labels: ["NAS1"], paths: ["/media/NAS1"] }),
+    ctx.matchDeviceValue("my NAS1 backup notes", { labels: ["NAS1"], paths: [] }),
+  ],
+  ["NAS1", "/media/NAS1", null]);
+T("servesSmb reads published ports, not the add-on name",
+  [ctx.servesSmb({ network: { "445/tcp": 445 } }), ctx.servesSmb({ name: "samba", network: { "80/tcp": 80 } }), ctx.servesSmb(null)],
+  [true, false, false]);
 
 // A drive plus eight dongles needs a second hardware row, and everything
 // below the hardware tier has to move down to make space for it.
@@ -269,8 +325,11 @@ T("formatBytes", [ctx.formatBytes(0), ctx.formatBytes(1536), ctx.formatBytes(5 *
 T("formatAge", [ctx.formatAge(30e3), ctx.formatAge(90 * 60e3), ctx.formatAge(5 * 864e5)], ["just now", "1 hour", "5 days"]);
 T("sparklinePath maps a flat series to a flat line",
   ctx.sparklinePath([5, 5, 5], 10, 4), "M0.0,4.0 L5.0,4.0 L10.0,4.0");
-T("findPathInOptions ignores an unrelated option",
-  ctx.findPathInOptions({ mqtt: { server: "mqtt://core" } }, ["/dev/ttyUSB0"]), null);
+T("findDeviceInOptions ignores an unrelated option",
+  ctx.findDeviceInOptions({ mqtt: { server: "mqtt://core" } }, { paths: ["/dev/ttyUSB0"], labels: [] }), null);
+T("findDeviceInOptions reports the option key and what it matched",
+  ctx.findDeviceInOptions({ serial: { port: "/dev/ttyUSB0" } }, { paths: ["/dev/ttyUSB0"], labels: [] }),
+  { option: "serial.port", matched: "/dev/ttyUSB0" });
 
 // --- config changes apply live ---------------------------------------------
 // Regression: every option inside a *named* ha-form expandable was written to

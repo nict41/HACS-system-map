@@ -8,6 +8,35 @@ was already there in a way an existing dashboard would notice.
 `VERSION` in `system-map-card.js` is the source of truth and CI refuses to
 publish a release whose tag doesn't match it.
 
+## [1.1.0] - 2026-09-02
+
+### Added
+
+- Disks referenced by **filesystem label** rather than path are now matched.
+  Samba addresses its disks by label (`moredisks: ["NAS1"]`), so its claim on
+  a drive was previously invisible - the matcher only looked for paths like
+  `/media/NAS1`. Labels are matched strictly (the option's whole value, or
+  the last segment of a path it holds) and labels under three characters are
+  ignored, because a substring test on a short label would match half the
+  options on the system.
+- **Re-published shares are followed.** Several add-ons referencing one disk
+  is usually one of them mounting and serving it, and the rest reaching it
+  over that share. Where a claimant publishes SMB - detected from its own
+  published ports, 445 or 139, not from its name - it gets a `serves
+  (moredisks)` edge from the drive, and the other add-ons referencing that
+  disk are drawn downstream of *it* with an `SMB: <share>` edge instead of
+  hanging off the hardware. That is what the dependency actually is: it's the
+  share that breaks when that add-on stops, not the disk. With no SMB server
+  among the claimants, every one of them keeps its direct edge as before.
+- The drive detail panel separates who mounts a disk from who reaches it over
+  the share.
+
+### Fixed
+
+- A disk republished to several add-ons listed all of them under its node,
+  overflowing across the tier. The label now names only who mounts it, at
+  most two, with the rest in the detail panel.
+
 ## [1.0.0] - 2026-09-02
 
 First tagged release. Everything below shipped before tagging began; it is
