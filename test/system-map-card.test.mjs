@@ -244,7 +244,7 @@ const many = newCard({}, { extraDevices: Array.from({ length: 8 }, (_, i) => ({ 
 const tierTop = (card, tier) => Math.min(...card._derived.nodes.filter((n) => n.tier === tier).map((n) => n.y));
 T("hardware wraps to a second row", new Set(hw(many).map((n) => n.y)).size, 2);
 T("the tiers below are pushed down to clear the extra row",
-  tierTop(many, "services") - tierTop(c, "services"), 130);
+  tierTop(many, "services") - tierTop(c, "services"), 182);
 T("the host stays put whatever is discovered around it",
   [many._node("host").y, many._node("host").x], [150, 610]);
 T("discovery off means no hardware nodes and no offset",
@@ -552,6 +552,53 @@ T("the cheap path is still the usual one",
     return [card._routeScan.fallback, read];
   })(), [false, ["9074a9fa_cloudflared"]]);
 
+// --- cards -----------------------------------------------------------------
+T("a node is drawn as a card, with the hostname as its own pill",
+  (() => {
+    const card = newCard();
+    card._renderGraph();
+    const svg = card._els.get(".smc-graph").innerHTML;
+    return [
+      svg.includes('class="smc-card"'),
+      svg.includes('class="smc-host-pill"'),
+      svg.includes(">nas.example.com<"),
+      svg.includes('class="smc-card-stripe"'),
+    ];
+  })(), [true, true, true, true]);
+T("the hostname pill is filled by a rule of its own, not left to the HTML pill's",
+  // It once shared the status bar's .smc-pill class, whose `background`
+  // means nothing to an SVG rect - so the pill painted black on black and
+  // the hostname read as an ordinary sub-line.
+  [/\.smc-host-pill\s*\{[^}]*fill:/.test(src), /\.smc-host-pill-text\s*\{[^}]*fill:/.test(src)],
+  [true, true]);
+T("the hostname appears once - as the pill, not also as a plain sub-line",
+  (() => {
+    const card = newCard();
+    card._renderGraph();
+    return (card._els.get(".smc-graph").innerHTML.match(/>nas\.example\.com</g) || []).length;
+  })(), 1);
+T("a card records its own box, so labels and panning use the real shape",
+  (() => {
+    const card = newCard();
+    card._renderGraph();
+    const pos = card._nodePositions.get(`node:${addonId("3b88f413_immich")}`);
+    return [pos.w, pos.h];
+  })(), [148, 144]);
+T("the host card is the larger one",
+  (() => {
+    const card = newCard();
+    card._renderGraph();
+    const pos = card._nodePositions.get("node:host");
+    return [pos.w, pos.h];
+  })(), [166, 152]);
+
+T("a long name wraps rather than overflowing",
+  ctx.wrapLabel("Advanced SSH & Web Terminal", 17), ["Advanced SSH &", "Web Terminal"]);
+T("a name too long for two lines is truncated, not dropped",
+  ctx.wrapLabel("Immich Machine Learning OpenVINO Extended Edition", 17).length, 2);
+T("a short name stays on one line", ctx.wrapLabel("Kiwix", 17), ["Kiwix"]);
+T("an empty name does not produce a broken line", ctx.wrapLabel("", 17), [""]);
+
 // --- add-on icons ----------------------------------------------------------
 // Supervisor serves each add-on's own icon, but the endpoint needs auth an
 // <image> tag cannot send - hence the signed URL, exactly as HA's own
@@ -588,7 +635,7 @@ T("the add-on's own icon is drawn when there is one, and the derived one when no
     card._addonIcons.set("3b88f413_immich", "/api/hassio/addons/3b88f413_immich/icon?authSig=xyz");
     card._renderGraph();
     const svg = card._els.get(".smc-graph").innerHTML;
-    return [svg.includes("<image href=\"/api/hassio/addons/3b88f413_immich/icon?authSig=xyz\""), svg.includes("clip-path=\"url(#smc-node-clip)\"")];
+    return [svg.includes("<image href=\"/api/hassio/addons/3b88f413_immich/icon?authSig=xyz\""), svg.includes("clip-path=\"url(#smc-icon-clip)\"")];
   })(), [true, true]);
 
 // --- host networking -------------------------------------------------------

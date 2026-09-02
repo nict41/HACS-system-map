@@ -15,8 +15,8 @@ backend add-on required, and no configuration necessary.
 The part that makes it a monitor rather than a diagram is the joins. An
 add-on can be "started" and an integration "loaded" while every entity they
 serve is dead, so entity states, the repairs registry and System Health are
-resolved back onto the node that owns them and drawn there as a red ring and
-a count.
+resolved back onto the node that owns them and drawn on its card as a red
+outline and a count.
 
 ## Features
 
@@ -35,13 +35,14 @@ a count.
   node(s) actually serve it - in the graph and in the integrations list at
   once - resolving through helper entities (e.g. `switch_as_x`) back to
   their real source, then panning the view onto the result
-- MDI icons per node
+- Every node is a card: status stripe, icon, name, LAN address, and - where
+  the service is reachable from outside - its public hostname in an amber pill
 - **Status bar**: Core / OS / Supervisor versions and pending updates, disk
   free, uptime, last backup age, internet connectivity, and open repair
   issues - each colour-coded by severity and clickable for the detail behind
   it
 - **Problem detection**: any node serving unavailable entities gets a red
-  ring and an `n/total unavailable` count; open repair issues and System
+  outline and an `n/total unavailable` count; open repair issues and System
   Health data land on the node for their domain
 - **Nothing is hand-placed.** Every node, edge, tier and position is derived
   from the instance's own data, so the card is the same code on your setup as
@@ -66,13 +67,13 @@ a count.
     → everything mounting it, so the chain is visible rather than implied by
     edge labels
   - **The boundary as a node**: a dashed **Internet** node with every way in
-    one hop from it, so entry and exit points are obvious at a glance, and
-    each exposed service wears its public hostname as a badge
-  - **Both addresses under each node**: the LAN address someone would type
-    and the public hostname it answers to, on separate lines - "on the LAN
-    only" and "also public" being different facts
+    one hop from it, so entry and exit points are obvious at a glance
+  - **Both addresses on each card**: the LAN address someone would type, and
+    the public hostname it answers to in a filled amber pill - "on the LAN
+    only" and "also public" being different facts, and the second one worth
+    spotting without reading the card
   - **Each add-on's own icon**, served by Supervisor through a signed URL,
-    with a ring of the status colour still showing around it
+    with the status colour on the card's top stripe
   - **Routers** from integrations reporting `device_tracker` entities with
     `source_type: router`
   - **Positions** by a barycentre pass that keeps connected nodes near each
@@ -177,7 +178,7 @@ checked against `VERSION` and refused if the two disagree.
 ## Development
 
 ```
-node test/system-map-card.test.mjs      # 58 assertions, no dependencies
+node test/system-map-card.test.mjs      # 179 assertions, no dependencies
 ```
 
 No build step: the card is evaluated against a stubbed DOM, covering config

@@ -8,6 +8,34 @@ was already there in a way an existing dashboard would notice.
 `VERSION` in `system-map-card.js` is the source of truth and CI refuses to
 publish a release whose tag doesn't match it.
 
+## [1.9.0] - 2026-09-02
+
+### Changed
+
+- **Nodes are cards, not circles.** A circle could hold a name and a couple of
+  cramped lines beneath it; the facts worth showing per node - name, LAN
+  address, public hostname, what is wrong with it - had outgrown that. Each
+  node is now a portrait card with a status stripe across the top, the
+  add-on's own icon, the wrapped name, and its addresses stacked below.
+  Highlighting, dimming, the problem badge and the dashed boundary style all
+  moved onto the card's own outline.
+- **A public hostname is now a filled amber pill inside its card.** It used to
+  be one more grey sub-line, indistinguishable at a glance from the LAN
+  address next to it, which defeated the point of deriving it. It now carries
+  the same amber as the EXPOSED status pill and the boundary node, so which
+  services are reachable from outside reads across the whole map without
+  looking anything up.
+
+### Fixed
+
+- **The hostname pill painted black on black.** It shared the `smc-pill` class
+  with the status bar's HTML pills, whose rules set `background` - which means
+  nothing to an SVG rect - so it fell back to a black fill on a black card and
+  the hostname read as ordinary body text. The SVG pill has its own class and
+  its own paint rules now, with a test that they exist.
+- **Card contents sat at the top of a fixed-height box.** A one-line node left
+  half its card empty. The content block is measured and centred instead.
+
 ## [1.8.1] - 2026-09-02
 
 ### Fixed

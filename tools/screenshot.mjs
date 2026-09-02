@@ -157,6 +157,14 @@ const page = `<!doctype html><html><head><meta charset="utf-8"><style>
           }
           throw new Error("no fixture for " + msg.endpoint);
         }
+        if (msg.type === "auth/sign_path" && msg.path.endsWith("/logs")) {
+          // Logs are signed and fetched exactly like icons now, so the stand-in
+          // has to distinguish them - handing back an icon for a log request is
+          // how the fixture silently produced a map with no routes on it.
+          const slug = msg.path.split("/")[4];
+          const body = slug.includes("cloudflared") ? CLOUDFLARED_LOG : slug + " started";
+          return { path: "data:text/plain;charset=utf-8," + encodeURIComponent(body) };
+        }
         if (msg.type === "auth/sign_path") {
           // Stands in for Supervisor's real icon endpoint: a distinct mark
           // per add-on, so the rendered image shows what shipping icons

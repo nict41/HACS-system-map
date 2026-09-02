@@ -112,7 +112,7 @@
 // version in the console is always the version of the file that's running -
 // which is the first thing worth knowing when a dashboard misbehaves after
 // an update, and the quickest way to catch a stale browser cache.
-const VERSION = "1.8.1";
+const VERSION = "1.9.0";
 
 console.info(
   `%c SYSTEM-MAP-CARD %c v${VERSION} `,
@@ -476,14 +476,23 @@ const GRID_START_Y = 1180; // first auto-grid sits below the curated layout
 // reported as one - see _renderErrors.
 const SUPERVISOR_KEYS = new Set(["addons", "host", "core", "os", "supervisor", "network", "backups", "hardware"]);
 
+// A node is a card, not a circle. 148 wide is set by the longest thing it
+// has to hold legibly - a hostname like "share.nicholastoo.com" at 9.5px -
+// since a truncated hostname defeats the point of showing one at all.
+const CARD_W = 148;
+const CARD_H = 144;
+const CARD_HOST_W = 166; // the host earns a little more room
+const CARD_HOST_H = 152;
+const cardSize = (n) => (n.kind === "host" ? { w: CARD_HOST_W, h: CARD_HOST_H } : { w: CARD_W, h: CARD_H });
+
 // Auto-layout geometry for the tiers below the hardware row.
-const LAYOUT_ROW_H = 150;
-const LAYOUT_TIER_GAP = 34;
+const LAYOUT_ROW_H = 182; // a card plus breathing room
+const LAYOUT_TIER_GAP = 40;
 const LAYOUT_MARGIN_X = 110;
 const LAYOUT_MAX_PER_ROW = 6;
 
 const HW_PER_ROW = 7;
-const HW_ROW_H = 130;
+const HW_ROW_H = 182;
 const HW_MARGIN_X = 90;
 const HW_HOST_COL = 3; // the host keeps the middle of the first row
 const HW_COL_W = (1220 - 2 * HW_MARGIN_X) / (HW_PER_ROW - 1);
@@ -795,6 +804,31 @@ function servesSmb(info) {
   return Object.keys(info?.options || {}).some((key) => /^workgroup$|smb|samba/i.test(key));
 }
 
+// Breaks a node's name across at most two lines, on word boundaries where it
+// can. Widths are estimated from character count - close enough at these
+// sizes, and it avoids measuring text, which SVG makes expensive.
+function wrapLabel(text, maxChars, maxLines = 2) {
+  const words = String(text || "").split(/\s+/).filter(Boolean);
+  const lines = [];
+  let line = "";
+  for (const word of words) {
+    const candidate = line ? `${line} ${word}` : word;
+    if (candidate.length <= maxChars || !line) {
+      line = candidate;
+    } else {
+      lines.push(line);
+      line = word;
+      if (lines.length === maxLines) break;
+    }
+  }
+  if (lines.length < maxLines && line) lines.push(line);
+  if (!lines.length) return [""];
+  // Whatever didn't fit is marked as cut rather than silently dropped.
+  const used = lines.join(" ").length;
+  if (used < String(text).length) lines[lines.length - 1] = truncate(lines[lines.length - 1], maxChars);
+  return lines.map((l) => truncate(l, maxChars + 2));
+}
+
 // Sparkline over a fixed box, normalised to its own min/max - these sit next
 // to the number they summarise, so the shape is the point, not the scale.
 function sparklinePath(values, w, h) {
@@ -1016,7 +1050,7 @@ class SystemMapCard extends HTMLElement {
         .smc-node .smc-sub { fill: var(--secondary-text-color); font-size: 10px; font-weight: 400; }
         .smc-node.smc-node-small text { font-size: 9px; fill: white; }
         .smc-node.smc-dim { opacity: 0.2; }
-        .smc-node.smc-hi circle { stroke: #ffca28; stroke-width: 5; }
+        .smc-node-small.smc-hi circle { stroke: #ffca28; stroke-width: 5; }
         .smc-edge { stroke: var(--divider-color, #999); stroke-width: 2; fill: none; transition: opacity 0.15s ease; }
         .smc-edge.dashed { stroke-dasharray: 5 4; opacity: 0.6; }
         .smc-edge.smc-dim { opacity: 0.08; }
@@ -1070,11 +1104,24 @@ class SystemMapCard extends HTMLElement {
         .smc-legend { position: absolute; left: 8px; bottom: 8px; z-index: 2; display: flex; flex-wrap: wrap; gap: 4px 10px; max-width: calc(100% - 60px); padding: 6px 8px; border-radius: 6px; background: var(--card-background-color, #fff); opacity: 0.92; font-size: 0.72em; color: var(--secondary-text-color); box-shadow: 0 1px 3px rgba(0,0,0,0.25); }
         .smc-legend span { display: inline-flex; align-items: center; gap: 4px; }
         .smc-legend i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
-        .smc-node.smc-problem circle { stroke: var(--error-color, #db4437); stroke-width: 4; }
+        .smc-node-small.smc-problem circle { stroke: var(--error-color, #db4437); stroke-width: 4; }
         /* The boundary node gets a dashed ring: it isn't a thing running on
            this machine, it's where the machine stops. */
-        .smc-node.smc-internet circle { stroke: #ffa726; stroke-width: 3; stroke-dasharray: 6 4; }
-        .smc-node.smc-internet text { font-weight: 600; }
+        .smc-card-node.smc-internet .smc-card { stroke: #ffa726; stroke-width: 2; stroke-dasharray: 7 4; }
+        .smc-card { fill: var(--card-background-color, #1c1c1c); stroke: var(--divider-color, #4a4a4a); stroke-width: 1; cursor: pointer; transition: opacity 0.15s ease; }
+        .smc-card-node:hover .smc-card { stroke: var(--primary-color, #3f51b5); stroke-width: 2; }
+        .smc-card-stripe { pointer-events: none; }
+        .smc-card-name { fill: var(--primary-text-color); font-size: 12.5px; font-weight: 600; text-anchor: middle; pointer-events: none; }
+        .smc-card-sub { fill: var(--secondary-text-color); font-size: 10px; font-weight: 400; text-anchor: middle; pointer-events: none; }
+        .smc-card-sub.smc-card-bad { fill: var(--error-color, #db4437); font-weight: 600; }
+        /* The hostname is the one fact worth spotting from across the room -
+           if a node has one it is reachable from outside - so it gets the
+           same amber the boundary and the EXPOSED status pill use, filled
+           rather than outlined so it reads before the node's own name does. */
+        .smc-host-pill { fill: #ffca28; pointer-events: none; }
+        .smc-host-pill-text { fill: #1b1b1b; font-size: 10.5px; font-weight: 700; text-anchor: middle; letter-spacing: 0.2px; pointer-events: none; }
+        .smc-card-node.smc-problem .smc-card { stroke: var(--error-color, #db4437); stroke-width: 2; }
+        .smc-card-node.smc-hi .smc-card { stroke: #ffca28; stroke-width: 3; }
         .smc-problem-badge { fill: var(--error-color, #db4437); font-size: 10px; font-weight: 700; text-anchor: middle; }
         .smc-detail-section { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--divider-color, #ddd); }
         .smc-detail-section h4 { margin: 0 0 4px; font-size: 0.85em; font-weight: 600; color: var(--secondary-text-color); }
@@ -2984,15 +3031,17 @@ class SystemMapCard extends HTMLElement {
 
     // Tier bounding boxes - computed from the actual visible node positions
     // + radii each render, so they stay correct without manual upkeep.
+    // A card carries its own text, so the tier box only has to contain the
+    // cards themselves plus a margin - no more guessing at how many label
+    // lines might hang below a circle.
     const boxes = {};
     for (const n of visible) {
       const b = boxes[n.tier] || (boxes[n.tier] = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
-      const topPad = n.badge ? n.r + 32 : n.r + 16;
-      const bottomPad = n.r + 76; // label plus up to three sub-label lines, all below the circle
-      b.minX = Math.min(b.minX, n.x - n.r - 16);
-      b.maxX = Math.max(b.maxX, n.x + n.r + 16);
-      b.minY = Math.min(b.minY, n.y - topPad);
-      b.maxY = Math.max(b.maxY, n.y + bottomPad);
+      const { w, h } = cardSize(n);
+      b.minX = Math.min(b.minX, n.x - w / 2 - 16);
+      b.maxX = Math.max(b.maxX, n.x + w / 2 + 16);
+      b.minY = Math.min(b.minY, n.y - h / 2 - 16);
+      b.maxY = Math.max(b.maxY, n.y + h / 2 + 16);
     }
 
     const boxesSvg = TIER_ORDER.filter((t) => boxes[t])
@@ -3030,35 +3079,69 @@ class SystemMapCard extends HTMLElement {
       .map((n) => {
         const { subs, status, problem } = this._nodeState(n);
         const color = colorFor(status);
-        this._nodePositions.set(`node:${n.id}`, { x: n.x, y: n.y, r: n.r });
+        const { w, h } = cardSize(n);
+        const x0 = n.x - w / 2;
+        const y0 = n.y - h / 2;
+        this._nodePositions.set(`node:${n.id}`, { x: n.x, y: n.y, w, h, r: Math.max(w, h) / 2 });
         const isHi = !!this._highlight?.has(`node:${n.id}`);
         const cls =
-          "smc-node" +
+          "smc-node smc-card-node" +
           (n.kind === "internet" ? " smc-internet" : "") +
           (problem ? " smc-problem" : "") +
           (dimming ? (isHi ? " smc-hi" : " smc-dim") : "");
-        // The add-on's own icon where it ships one, drawn inside the circle so
-        // a ring of the status colour still shows around it. Otherwise the
-        // icon derived from what the add-on does.
+
+        // The add-on's own icon where it ships one; otherwise the icon
+        // derived from what the add-on does, on a tile of the status colour
+        // so it stays visible against the card.
         const ownIcon = n.slug ? this._addonIcons.get(n.slug) : null;
         const iconPath = n.icon ? ICON_PATHS[n.icon] : null;
-        const iconSize = n.r * 1.15;
-        const ownSize = n.r * 1.5;
+        const size = n.kind === "host" ? 42 : 36;
+        const ix = n.x - size / 2;
+        // Cards are a fixed size so the grid stays even, but their contents
+        // vary from one line to four. Measure the block first and centre it,
+        // rather than pinning it to the top and leaving a dead half below.
+        const nameLines = wrapLabel(n.label, n.kind === "host" ? 20 : 17);
+        const subLines = subs.filter((line) => line !== n.hostname);
+        const contentH =
+          size + 18 + nameLines.length * 15 + 2 + subLines.length * 14 + (n.hostname ? 16 : -11);
+        const iy = y0 + Math.max(12, (h - contentH) / 2);
         const iconSvg = ownIcon
-          ? `<image href="${escapeHtml(ownIcon)}" x="${n.x - ownSize / 2}" y="${n.y - ownSize / 2}" width="${ownSize}" height="${ownSize}" clip-path="url(#smc-node-clip)" preserveAspectRatio="xMidYMid slice" pointer-events="none" />`
-          : iconPath
-            ? `<g transform="translate(${n.x - iconSize / 2},${n.y - iconSize / 2}) scale(${iconSize / 24})" pointer-events="none"><path d="${iconPath}" fill="white" /></g>`
-            : "";
+          ? `<image href="${escapeHtml(ownIcon)}" x="${ix}" y="${iy}" width="${size}" height="${size}" clip-path="url(#smc-icon-clip)" preserveAspectRatio="xMidYMid slice" pointer-events="none" />`
+          : `<rect x="${ix}" y="${iy}" width="${size}" height="${size}" rx="9" fill="${color}" />` +
+            (iconPath
+              ? `<g transform="translate(${ix + size * 0.16},${iy + size * 0.16}) scale(${(size * 0.68) / 24})" pointer-events="none"><path d="${iconPath}" fill="white" /></g>`
+              : "");
+
+        // Content is laid out with a cursor rather than fixed offsets, so a
+        // two-line name pushes what follows down instead of overlapping it.
+        let cursor = iy + size + 18;
+        const parts = [];
+        for (const line of nameLines) {
+          parts.push(`<text class="smc-card-name" x="${n.x}" y="${cursor}">${escapeHtml(line)}</text>`);
+          cursor += 15;
+        }
+        cursor += 2;
+        for (const line of subLines) {
+          const tone = problem && line === problem.label ? " smc-card-bad" : "";
+          parts.push(`<text class="smc-card-sub${tone}" x="${n.x}" y="${cursor}">${escapeHtml(truncate(line, 22))}</text>`);
+          cursor += 14;
+        }
+        if (n.hostname) {
+          const pw = w - 16;
+          parts.push(
+            `<rect class="smc-host-pill" x="${n.x - pw / 2}" y="${cursor - 2}" width="${pw}" height="18" rx="9" />` +
+              `<text class="smc-host-pill-text" x="${n.x}" y="${cursor + 11}">${escapeHtml(truncate(n.hostname, 24))}</text>`
+          );
+          cursor += 22;
+        }
+
         return `
-          <g class="${cls}" data-node="${n.id}">
-            <circle cx="${n.x}" cy="${n.y}" r="${n.r}" fill="${color}" />
+          <g class="${cls}" data-node="${n.id}"><title>${escapeHtml([n.label, ...subs].join(" · "))}</title>
+            <rect class="smc-card" x="${x0}" y="${y0}" width="${w}" height="${h}" rx="12" />
+            <path class="smc-card-stripe" d="M${x0 + 12},${y0} H${x0 + w - 12} A12,12 0 0 1 ${x0 + w},${y0 + 12} V${y0 + 5} H${x0} V${y0 + 12} A12,12 0 0 1 ${x0 + 12},${y0} Z" fill="${color}" />
             ${iconSvg}
-            ${n.badge ? `<text class="smc-badge" x="${n.x}" y="${n.y - n.r - 10}">${escapeHtml(n.badge)}</text>` : ""}
-            ${problem ? `<circle cx="${n.x + n.r * 0.72}" cy="${n.y - n.r * 0.72}" r="9" fill="var(--error-color, #db4437)" stroke="var(--card-background-color, #fff)" stroke-width="2" /><text class="smc-problem-badge" x="${n.x + n.r * 0.72}" y="${n.y - n.r * 0.72 + 4}" style="fill:#fff">${escapeHtml(problem.badge)}</text>` : ""}
-            <text x="${n.x}" y="${n.y + n.r + 16}">${escapeHtml(n.label)}</text>
-            ${subs
-              .map((line, i) => `<text class="smc-sub" x="${n.x}" y="${n.y + n.r + 30 + i * 13}">${escapeHtml(line)}</text>`)
-              .join("")}
+            ${parts.join("")}
+            ${problem ? `<circle cx="${x0 + w - 12}" cy="${y0 + 12}" r="9" fill="var(--error-color, #db4437)" stroke="var(--card-background-color, #1c1c1c)" stroke-width="2" /><text class="smc-problem-badge" x="${x0 + w - 12}" y="${y0 + 16}" style="fill:#fff">${escapeHtml(problem.badge)}</text>` : ""}
           </g>`;
       })
       .join("");
@@ -3129,6 +3212,9 @@ class SystemMapCard extends HTMLElement {
           <clipPath id="smc-node-clip" clipPathUnits="objectBoundingBox">
             <circle cx="0.5" cy="0.5" r="0.5" />
           </clipPath>
+          <clipPath id="smc-icon-clip" clipPathUnits="objectBoundingBox">
+            <rect x="0" y="0" width="1" height="1" rx="0.24" ry="0.24" />
+          </clipPath>
         </defs>
         ${boxesSvg}
         ${tierLabelsSvg}
@@ -3174,12 +3260,11 @@ class SystemMapCard extends HTMLElement {
     const PAD_X = 7;
     // Seed with the nodes themselves so a label is never written across a
     // circle or the name underneath it.
-    const taken = nodes.map((n) => ({
-      x0: n.x - n.r,
-      x1: n.x + n.r,
-      y0: n.y - n.r,
-      y1: n.y + n.r + 34, // the label and sub-label rows below the circle
-    }));
+    // Cards carry their own text, so their own box is the whole obstacle.
+    const taken = nodes.map((n) => {
+      const { w, h } = cardSize(n);
+      return { x0: n.x - w / 2, x1: n.x + w / 2, y0: n.y - h / 2, y1: n.y + h / 2 };
+    });
     // How much of `box` is buried under things already placed. Zero means a
     // free slot; otherwise it ranks the candidates so a crowded label can
     // still take the least-bad position rather than staying where it was.
