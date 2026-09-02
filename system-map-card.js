@@ -112,7 +112,7 @@
 // version in the console is always the version of the file that's running -
 // which is the first thing worth knowing when a dashboard misbehaves after
 // an update, and the quickest way to catch a stale browser cache.
-const VERSION = "1.7.0";
+const VERSION = "1.7.1";
 
 console.info(
   `%c SYSTEM-MAP-CARD %c v${VERSION} `,
@@ -341,6 +341,26 @@ function servicesFromLog(text) {
     if (!seen.has(service)) seen.set(service, { service, host: match[1], port: parseInt(match[2], 10) });
   }
   return [...seen.values()];
+}
+
+// Does this log belong to something that terminates traffic from outside?
+// Deliberately narrow markers: a remotely-managed tunnel may log no ingress
+// rules this card can parse, but it still announces itself, and "is this a
+// way in" is a much lower bar to clear than "what does it route". Loose
+// matching on a word like "tunnel" or "ingress" would catch half the add-ons
+// on a system - Home Assistant has its own ingress - so these are the exact
+// lines the tunnels and VPNs print.
+const TUNNEL_LOG_MARKERS = [
+  /tunnelID=/i,
+  /Starting tunnel/i,
+  /Registered tunnel connection/i,
+  /Cloudflare Tunnel/i,
+  /\btailscaled?\b/i,
+  /\bwireguard\b/i,
+  /wg[0-9]+: link becomes ready/i,
+];
+function looksLikeTunnelLog(text) {
+  return typeof text === "string" && TUNNEL_LOG_MARKERS.some((marker) => marker.test(text));
 }
 
 // Whose logs are worth reading for routes? An add-on holding a tunnel or
@@ -1723,13 +1743,17 @@ class SystemMapCard extends HTMLElement {
   async _loadRouteLogs() {
     const found = [];
     this._routeScan = { considered: [], scanned: [], fallback: false };
+    this._tunnelSlugs = new Set();
 
     const scan = async (addon, why) => {
       const log = await this._fetchAddonLog(addon.slug, 0);
       this._logSizes.set(addon.slug, log ? log.length : 0);
       const routes = routesFromLog(log);
+      const tunnel = looksLikeTunnelLog(log);
+      if (tunnel) this._tunnelSlugs.add(addon.slug);
       this._routeScan.scanned.push(
-        `${addon.name || addon.slug}: ${why}, ${log ? log.length : 0} bytes, ${routes.length} rule${routes.length === 1 ? "" : "s"}`
+        `${addon.name || addon.slug}: ${why}, ${log ? log.length : 0} bytes, ${routes.length} rule${routes.length === 1 ? "" : "s"}` +
+          (tunnel ? ", log identifies it as a way in" : "")
       );
       for (const route of routes) found.push({ ...route, viaSlug: addon.slug });
     };
@@ -1742,6 +1766,7 @@ class SystemMapCard extends HTMLElement {
         this._routeScan.considered.push(`${addon.name || addon.slug}: no tunnel-shaped option`);
         continue;
       }
+      this._tunnelSlugs.add(addon.slug);
       await scan(addon, "options name a tunnel or proxy");
     }
 
@@ -2204,9 +2229,12 @@ class SystemMapCard extends HTMLElement {
       entries.set(route.viaId, entry);
     }
     for (const node of addonNodes) {
-      if (!(node.roles || []).some((role) => /VPN|Tailscale|WireGuard|OpenVPN/i.test(role))) continue;
+      const isVpn = (node.roles || []).some((role) => /VPN|Tailscale|WireGuard|OpenVPN/i.test(role));
+      const isTunnel = this._tunnelSlugs?.has(node.slug);
+      if (!isVpn && !isTunnel) continue;
       const entry = entries.get(node.id) || { node, hostnames: [], vpn: false };
-      entry.vpn = true;
+      entry.vpn = isVpn;
+      entry.tunnel = isTunnel;
       entries.set(node.id, entry);
     }
     if (!entries.size) return { nodes: [], edges: [] };
@@ -2229,7 +2257,13 @@ class SystemMapCard extends HTMLElement {
     const edges = [...entries.values()].map(({ node, hostnames, vpn }) => [
       "internet",
       node.id,
-      { label: hostnames.length ? `${hostnames.length} hostname${hostnames.length === 1 ? "" : "s"}` : "VPN" },
+      {
+        label: hostnames.length
+          ? `${hostnames.length} hostname${hostnames.length === 1 ? "" : "s"}`
+          : vpn
+            ? "VPN"
+            : "tunnel",
+      },
     ]);
     return { nodes: [internet], edges };
   }
@@ -2343,10 +2377,19 @@ class SystemMapCard extends HTMLElement {
     // add-on behind it.
     for (const node of addonNodes) {
       const mine = routes.filter((r) => r.viaId === node.id);
-      if (!mine.length) continue;
+      // Being a way in and having readable rules are different facts, and
+      // tying the first to the second put a tunnel whose rules could not be
+      // parsed in with the ordinary services. The evidence for "way in" is
+      // its own: tunnel-shaped options, or a log that says so.
+      const isWayIn = mine.length > 0 || this._tunnelSlugs?.has(node.slug);
+      if (!isWayIn) continue;
       node.tier = "remote";
-      node.routes = mine;
-      node.notes.push(...mine.map((r) => `${r.hostname} → ${r.service}`));
+      if (mine.length) {
+        node.routes = mine;
+        node.notes.push(...mine.map((r) => `${r.hostname} → ${r.service}`));
+      } else {
+        node.notes.push("Identified as a way in from outside, but none of its routes could be read");
+      }
     }
     return routes;
   }

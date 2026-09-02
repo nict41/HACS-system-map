@@ -370,6 +370,44 @@ T("add-ons placed in a tier are not repeated in the leftovers grid",
     return c._addons.every((a) => !c._nodePositions.has(`addon:${a.slug}`));
   })(), true);
 
+// --- a way in is a way in, readable rules or not ----------------------------
+// Tying the remote-access tier to successfully-parsed routes put a tunnel
+// whose rules could not be read in among the ordinary services.
+T("a tunnel whose rules cannot be read is still remote access",
+  await (async () => {
+    const card = newCard({}, { logRoutes: [] });
+    card._addonInfoCache.set("9074a9fa_cloudflared", { name: "Cloudflared", network: {}, options: {} });
+    card._fetchAddonLog = async (slug) =>
+      slug === "9074a9fa_cloudflared"
+        ? "INF Starting tunnel tunnelID=d159e957\nINF Registered tunnel connection connIndex=0"
+        : "nothing of interest";
+    await card._loadRouteLogs();
+    card._derive();
+    const node = card._node(addonId("9074a9fa_cloudflared"));
+    return [node.tier, node.routes, node.notes.at(-1)];
+  })(),
+  ["remote", undefined, "Identified as a way in from outside, but none of its routes could be read"]);
+T("and it is still one hop from the outside, labelled for what it is",
+  await (async () => {
+    const card = newCard({}, { logRoutes: [] });
+    card._addonInfoCache.set("9074a9fa_cloudflared", { name: "Cloudflared", network: {}, options: {} });
+    card._fetchAddonLog = async (slug) => (slug === "9074a9fa_cloudflared" ? "INF tunnelID=abc" : "");
+    await card._loadRouteLogs();
+    card._derive();
+    return card._derived.edges.filter((e) => e[0] === "internet").map((e) => [e[1], e[2].label]);
+  })(), [[addonId("9074a9fa_cloudflared"), "tunnel"]]);
+T("the markers are narrow enough not to catch ordinary add-ons",
+  [
+    ctx.looksLikeTunnelLog("INF Starting tunnel tunnelID=abc"),
+    ctx.looksLikeTunnelLog("Registered tunnel connection connIndex=0"),
+    ctx.looksLikeTunnelLog("tailscaled starting"),
+    ctx.looksLikeTunnelLog("[Api:RouterExplorer] Mapped {/api/ingress, GET} route"),
+    ctx.looksLikeTunnelLog("Starting NGINX, ingress enabled"),
+    ctx.looksLikeTunnelLog("nothing to see here"),
+  ], [true, true, true, false, false, false]);
+T("a readable tunnel still reports its hostnames rather than the fallback note",
+  c._node(addonId("9074a9fa_cloudflared")).routes.length, 2);
+
 // --- route resolution, step by step ----------------------------------------
 // A private address is this machine whatever /network/info said. Depending on
 // that endpoint having answered - and having named the same interface the

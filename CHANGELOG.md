@@ -8,6 +8,23 @@ was already there in a way an existing dashboard would notice.
 `VERSION` in `system-map-card.js` is the source of truth and CI refuses to
 publish a release whose tag doesn't match it.
 
+## [1.7.1] - 2026-09-02
+
+### Fixed
+
+- **A tunnel add-on sat among the ordinary services whenever its rules
+  couldn't be read.** The remote-access tier was decided by whether any route
+  had been successfully parsed for an add-on - so the same failures that hid
+  the hostnames also moved Cloudflared out of "remote access / entry & exit
+  points", leaving Tailscale there alone. Being a way in and having readable
+  rules are different facts. An add-on is now placed in that tier on its own
+  evidence: tunnel-shaped options, or a log that identifies it as one. It is
+  drawn one hop from the Internet node either way, labelled `tunnel` rather
+  than a hostname count, and says plainly that its routes could not be read.
+- The log markers for this are deliberately narrow - the exact lines tunnels
+  and VPNs print, not the word "tunnel" or "ingress", which would catch half
+  the add-ons on a system given Home Assistant has an ingress of its own.
+
 ## [1.7.0] - 2026-09-02
 
 ### Fixed
