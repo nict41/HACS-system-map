@@ -8,6 +8,20 @@ was already there in a way an existing dashboard would notice.
 `VERSION` in `system-map-card.js` is the source of truth and CI refuses to
 publish a release whose tag doesn't match it.
 
+## [1.3.1] - 2026-09-02
+
+### Fixed
+
+- The Release workflow lost a release to a transient GitHub API failure, in
+  two compounding ways. The v1.3.0 run passed its tests and version check and
+  then got `HTTP 504` from the create-release call - but the call had already
+  half-succeeded, leaving a **draft** release behind. A draft has no tag,
+  404s from `/releases/tags/`, and is invisible to HACS; worse, the workflow's
+  "already released?" check used `gh release view`, which *does* find drafts,
+  so a re-run skipped every step and reported success while HACS still saw
+  nothing. Creation now retries three times with a backoff, and "already
+  released" means published: a draft is published rather than skipped over.
+
 ## [1.3.0] - 2026-09-02
 
 ### Added

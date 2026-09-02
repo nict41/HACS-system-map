@@ -48,17 +48,32 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "Version $version, tag $tag"
 
-      - name: Skip if this version was already released
+      # "Already released" has to mean *published*. A failed create can leave
+      # a draft behind - a 504 from the create call did exactly that once,
+      # and a draft has no tag, 404s from /releases/tags/, and is invisible to
+      # HACS. Treating that as released is how an update silently never
+      # arrives, so a draft is published rather than skipped over.
+      - name: Skip if this version is already published
         id: check
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.v.outputs.tag }}
         run: |
-          if gh release view "${{ steps.v.outputs.tag }}" >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "${{ steps.v.outputs.tag }} is already released."
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
+          state="$(gh release view "$TAG" --json isDraft --jq '.isDraft' 2>/dev/null || echo missing)"
+          case "$state" in
+            false)
+              echo "exists=true" >> "$GITHUB_OUTPUT"
+              echo "$TAG is already published."
+              ;;
+            true)
+              echo "::warning::$TAG exists only as a draft - publishing it."
+              gh release edit "$TAG" --draft=false --tag "$TAG" --target "${GITHUB_SHA}"
+              echo "exists=true" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "exists=false" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
 
       # A release is only ever cut from code that passes, whichever route
       # triggered it.
@@ -66,18 +81,39 @@ jobs:
         if: steps.check.outputs.exists == 'false' || github.ref_type == 'tag'
         run: node test/system-map-card.test.mjs
 
+      # Retried because the GitHub API does occasionally 504 on this call, and
+      # losing a release to a transient timeout means the update silently
+      # never reaches HACS. Each attempt re-checks for an existing release, so
+      # a create that actually succeeded before timing out is not duplicated.
       - name: Create the release
         if: steps.check.outputs.exists == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.v.outputs.tag }}
         run: |
-          # --target pins the tag to this commit, so pushing to main creates
-          # the tag as well as the release.
-          gh release create "${{ steps.v.outputs.tag }}" \
-            --target "${GITHUB_SHA}" \
-            --title "${{ steps.v.outputs.tag }}" \
-            --generate-notes \
-            system-map-card.js
+          for attempt in 1 2 3; do
+            # A previous attempt may have created it (published or draft)
+            # before the response timed out.
+            state="$(gh release view "$TAG" --json isDraft --jq '.isDraft' 2>/dev/null || echo missing)"
+            if [ "$state" != "missing" ]; then
+              echo "$TAG exists now; publishing it if needed and attaching the card."
+              [ "$state" = "true" ] && gh release edit "$TAG" --draft=false --tag "$TAG" --target "${GITHUB_SHA}"
+              gh release upload "$TAG" system-map-card.js --clobber && exit 0
+            fi
+            # --target pins the tag to this commit, so pushing to main creates
+            # the tag as well as the release.
+            if gh release create "$TAG" \
+                 --target "${GITHUB_SHA}" \
+                 --title "$TAG" \
+                 --generate-notes \
+                 system-map-card.js; then
+              exit 0
+            fi
+            echo "::warning::attempt ${attempt} to create $TAG failed; retrying"
+            sleep $((attempt * 10))
+          done
+          echo "::error::could not create release $TAG after 3 attempts"
+          exit 1
 
       - name: Attach the card to a release published from the website
         if: steps.check.outputs.exists == 'true' && github.ref_type == 'tag'

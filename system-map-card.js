@@ -112,7 +112,7 @@
 // version in the console is always the version of the file that's running -
 // which is the first thing worth knowing when a dashboard misbehaves after
 // an update, and the quickest way to catch a stale browser cache.
-const VERSION = "1.3.0";
+const VERSION = "1.3.1";
 
 console.info(
   `%c SYSTEM-MAP-CARD %c v${VERSION} `,
