@@ -370,6 +370,76 @@ T("add-ons placed in a tier are not repeated in the leftovers grid",
     return c._addons.every((a) => !c._nodePositions.has(`addon:${a.slug}`));
   })(), true);
 
+// --- reading a log --------------------------------------------------------
+// Add-on logs are plain text and the WebSocket supervisor/api proxy speaks
+// only JSON, so every read through it failed - and the old code returned the
+// error message as though it were the log, which is why a failed read showed
+// up as "log read (60 bytes)" with no rules in it.
+const logCard = (fetchImpl, wsImpl) => {
+  const card = newCard();
+  card._hass.connection = {
+    sendMessagePromise: async (msg) => {
+      if (msg.type === "auth/sign_path") return { path: `${msg.path}?authSig=x` };
+      if (wsImpl) return wsImpl(msg);
+      throw new Error("not JSON");
+    },
+  };
+  ctx.fetch = fetchImpl;
+  return card;
+};
+T("a log is fetched over REST with a signed URL",
+  await (async () => {
+    const seen = [];
+    const card = logCard(async (url) => {
+      seen.push(url);
+      return { ok: true, text: async () => "line one\nline two" };
+    });
+    const log = await card._fetchAddonLog("core_x", 0);
+    return [seen, log];
+  })(), [["/api/hassio/addons/core_x/logs?authSig=x"], "line one\nline two"]);
+T("a failed read returns nothing and records why, rather than passing the error off as the log",
+  await (async () => {
+    const card = logCard(async () => ({ ok: false, status: 403 }));
+    const log = await card._fetchAddonLog("core_x", 0);
+    return [log, card._logErrors.get("core_x")];
+  })(), [null, "HTTP 403"]);
+T("an empty log is a failure with a reason, not an empty success",
+  await (async () => {
+    const card = logCard(async () => ({ ok: true, text: async () => "   " }));
+    return [await card._fetchAddonLog("core_x", 0), card._logErrors.get("core_x")];
+  })(), [null, "the log was empty"]);
+T("the WebSocket proxy is still tried when signing is unavailable",
+  await (async () => {
+    const card = logCard(
+      async () => { throw new Error("no fetch"); },
+      async (msg) => (msg.type === "supervisor/api" ? "from the proxy" : (() => { throw new Error("x"); })())
+    );
+    return await card._fetchAddonLog("core_x", 0);
+  })(), "from the proxy");
+T("a scan reports a failed read as a failure, not as a zero-byte success",
+  await (async () => {
+    const card = newCard();
+    card._fetchAddonLog = async (slug) => { card._logErrors.set(slug, "HTTP 403"); return null; };
+    await card._loadRouteLogs();
+    return card._routeScan.scanned.some((line) => line.includes("LOG COULD NOT BE READ"));
+  })(), true);
+
+// Matching an option name is reason enough to spend a log read, and nowhere
+// near enough to call something an entry point: Let's Encrypt holds a
+// Cloudflare API token for DNS challenges and is not a way in.
+T("an option name alone does not move an add-on into remote access",
+  await (async () => {
+    const card = newCard({}, { logRoutes: [] });
+    card._addons.push({ slug: "core_letsencrypt", name: "Let's Encrypt", state: "started" });
+    card._addonInfoCache.set("core_letsencrypt", {
+      name: "Let's Encrypt", network: {}, options: { dns: { provider: "dns-cloudflare" }, cloudflare_api_token: "x" },
+    });
+    card._fetchAddonLog = async () => "Certbot renewing certificates";
+    await card._loadRouteLogs();
+    card._derive();
+    return card._node(addonId("core_letsencrypt")).tier;
+  })(), "services");
+
 // --- a way in is a way in, readable rules or not ----------------------------
 // Tying the remote-access tier to successfully-parsed routes put a tunnel
 // whose rules could not be read in among the ordinary services.

@@ -112,7 +112,7 @@
 // version in the console is always the version of the file that's running -
 // which is the first thing worth knowing when a dashboard misbehaves after
 // an update, and the quickest way to catch a stale browser cache.
-const VERSION = "1.7.1";
+const VERSION = "1.8.0";
 
 console.info(
   `%c SYSTEM-MAP-CARD %c v${VERSION} `,
@@ -367,6 +367,11 @@ function looksLikeTunnelLog(text) {
 // proxy credential, since that's exactly the case where the rules live
 // somewhere else and its options can't tell us anything. Keyed on the option
 // names it declares rather than on the add-on's name.
+//
+// This decides only where to spend a log read. It must never decide a tier:
+// the match is loose on purpose, and it catches things that merely *talk* to
+// a tunnel provider rather than being one - a certificate add-on with a
+// Cloudflare API token for DNS challenges, say.
 function looksLikeIngressProvider(options, prefix = "") {
   if (!options || typeof options !== "object") return false;
   return Object.entries(options).some(([key, value]) => {
@@ -855,6 +860,7 @@ class SystemMapCard extends HTMLElement {
     this._logRoutes = []; // ingress rules read out of logs
     this._logServices = []; // host:port endpoints add-ons named in their logs
     this._logSizes = new Map(); // slug -> bytes of log read, for the evidence panel
+    this._logErrors = new Map(); // slug -> why its log could not be read
     this._addonIcons = new Map(); // slug -> signed URL of the add-on's own icon
     this._refreshTimer = null;
     this._naturalViewBox = null; // full-fit viewBox, recomputed each render
@@ -1253,10 +1259,29 @@ class SystemMapCard extends HTMLElement {
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
       URL.revokeObjectURL(url);
-      const link = document.createElement("a");
-      link.download = `system-map-${new Date().toISOString().slice(0, 10)}.png`;
-      link.href = canvas.toDataURL("image/png");
-      link.click();
+      // A blob, not a data: URL, and anchored in the document before the
+      // click. A detached anchor pointed at a multi-megabyte data: URL is
+      // where the "unnamed file" comes from: several browsers - the Home
+      // Assistant companion app's webview among them - ignore the download
+      // attribute in that case and save the blob under a generated name.
+      canvas.toBlob((blob) => {
+        if (!blob) {
+          this._loadErrors.export = "the browser could not encode the image";
+          this._renderErrors();
+          return;
+        }
+        const href = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.download = `system-map-${new Date().toISOString().slice(0, 10)}.png`;
+        link.href = href;
+        link.rel = "noopener";
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        // Revoked on a later tick: revoking synchronously can cancel the
+        // download that was only just handed to the browser.
+        setTimeout(() => URL.revokeObjectURL(href), 10000);
+      }, "image/png");
     };
     img.onerror = () => {
       URL.revokeObjectURL(url);
@@ -1747,12 +1772,19 @@ class SystemMapCard extends HTMLElement {
 
     const scan = async (addon, why) => {
       const log = await this._fetchAddonLog(addon.slug, 0);
-      this._logSizes.set(addon.slug, log ? log.length : 0);
+      if (log === null) {
+        this._logSizes.delete(addon.slug);
+        this._routeScan.scanned.push(
+          `${addon.name || addon.slug}: ${why}, LOG COULD NOT BE READ - ${this._logErrors.get(addon.slug) || "unknown"}`
+        );
+        return;
+      }
+      this._logSizes.set(addon.slug, log.length);
       const routes = routesFromLog(log);
       const tunnel = looksLikeTunnelLog(log);
       if (tunnel) this._tunnelSlugs.add(addon.slug);
       this._routeScan.scanned.push(
-        `${addon.name || addon.slug}: ${why}, ${log ? log.length : 0} bytes, ${routes.length} rule${routes.length === 1 ? "" : "s"}` +
+        `${addon.name || addon.slug}: ${why}, ${log.length} bytes, ${routes.length} rule${routes.length === 1 ? "" : "s"}` +
           (tunnel ? ", log identifies it as a way in" : "")
       );
       for (const route of routes) found.push({ ...route, viaSlug: addon.slug });
@@ -1766,7 +1798,12 @@ class SystemMapCard extends HTMLElement {
         this._routeScan.considered.push(`${addon.name || addon.slug}: no tunnel-shaped option`);
         continue;
       }
-      this._tunnelSlugs.add(addon.slug);
+      // Note: deliberately NOT marked a way in here. Matching an option name
+      // is reason enough to spend a log read, but not to claim the add-on
+      // terminates outside traffic - Let's Encrypt holds a Cloudflare API
+      // token for DNS challenges and a file-sharing add-on may configure a
+      // trusted proxy, and neither is an entry point. Only parsed routes or
+      // the log markers earn that.
       await scan(addon, "options name a tunnel or proxy");
     }
 
@@ -2036,7 +2073,11 @@ class SystemMapCard extends HTMLElement {
         `tier <code>${esc(node?.tier || "not placed")}</code>`,
         info ? `options <code>${esc(Object.keys(info.options || {}).join(", ") || "none")}</code>` : "options not read yet",
         info?.map ? `folders <code>${esc((Array.isArray(info.map) ? info.map : Object.keys(info.map)).join(", "))}</code>` : null,
-        this._logSizes.has(addon.slug) ? `log read (${esc(String(this._logSizes.get(addon.slug)))} bytes)` : "log not read",
+        this._logErrors.has(addon.slug)
+          ? `<strong>log could not be read</strong>: ${esc(this._logErrors.get(addon.slug))}`
+          : this._logSizes.has(addon.slug)
+            ? `log read (${esc(String(this._logSizes.get(addon.slug)))} bytes)`
+            : "log not read",
       ].filter(Boolean);
       const links = node ? edgesFor(node.id) : [];
       return [
@@ -3299,20 +3340,53 @@ class SystemMapCard extends HTMLElement {
   // anything that has been running a while and chattering since. Reading
   // routes out of the last 400 lines is exactly why the public URLs
   // disappeared after the map became derived.
+  // Add-on logs come back as plain text, and the WebSocket `supervisor/api`
+  // proxy only speaks JSON - so every log read through it failed, and had
+  // been failing all along. Fetched over REST instead, with the URL signed
+  // first exactly as the icons are, which is the route Home Assistant's own
+  // frontend takes for the same endpoint.
+  //
+  // Failure returns null and is recorded. The old code returned the error
+  // message *as the log*, so a failed read looked like a successful one of
+  // about sixty bytes: the evidence panel reported "log read (60 bytes)",
+  // the route parser found no rules in it, and the actual fault - that no
+  // log had ever been read - was invisible.
   async _fetchAddonLog(slug, lines = 25) {
+    const endpoint = `/api/hassio/addons/${slug}/logs`;
+    let text = null;
     try {
-      const res = await this._hass.connection.sendMessagePromise({
-        type: "supervisor/api",
-        endpoint: `/addons/${slug}/logs`,
-        method: "get",
+      const signed = await this._hass.connection.sendMessagePromise({
+        type: "auth/sign_path",
+        path: endpoint,
+        expires: 60,
       });
-      const text = typeof res === "string" ? res : res?.data ?? "";
-      if (typeof text !== "string" || !text.trim()) return null;
-      const trimmed = text.trim();
-      return lines > 0 ? trimmed.split("\n").slice(-lines).join("\n") : trimmed;
+      if (!signed?.path) throw new Error("the log URL could not be signed");
+      const res = await fetch(signed.path);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      text = await res.text();
+      this._logErrors.delete(slug);
     } catch (e) {
-      return `Couldn't read the log: ${describeError(e)}`;
+      // Older cores, or a setup where signing is unavailable: the WebSocket
+      // proxy still works for the add-ons whose logs it can represent.
+      try {
+        const res = await this._hass.connection.sendMessagePromise({
+          type: "supervisor/api",
+          endpoint: `/addons/${slug}/logs`,
+          method: "get",
+        });
+        text = typeof res === "string" ? res : res?.data ?? null;
+        this._logErrors.delete(slug);
+      } catch (inner) {
+        this._logErrors.set(slug, describeError(e));
+        return null;
+      }
     }
+    if (typeof text !== "string" || !text.trim()) {
+      this._logErrors.set(slug, "the log was empty");
+      return null;
+    }
+    const trimmed = text.trim();
+    return lines > 0 ? trimmed.split("\n").slice(-lines).join("\n") : trimmed;
   }
 
   // rows: array of [label, value] or [label, htmlValue, true] where the

@@ -8,6 +8,37 @@ was already there in a way an existing dashboard would notice.
 `VERSION` in `system-map-card.js` is the source of truth and CI refuses to
 publish a release whose tag doesn't match it.
 
+## [1.8.0] - 2026-09-02
+
+### Fixed
+
+- **No add-on log had ever been read.** Add-on logs are plain text and the
+  WebSocket `supervisor/api` proxy speaks only JSON, so every read through it
+  failed - and the failure was disguised: the catch block returned the error
+  message *as though it were the log*. A failed read therefore looked like a
+  successful one of about sixty bytes, the route parser found no rules in
+  those sixty bytes, and the evidence panel dutifully reported "log read
+  (60 bytes)". That is why no Cloudflare hostname ever reached a service, and
+  why the diagnostics pointed nowhere: they were reporting a success that had
+  not happened. Logs are now fetched over REST with the URL signed first -
+  the route Home Assistant's own frontend takes for the same endpoint - with
+  the WebSocket proxy kept as a fallback. A failure now returns nothing,
+  records why, and the evidence panel says **log could not be read** with the
+  reason.
+- **Add-ons were moved into remote access for merely mentioning a tunnel.**
+  Matching an option name is reason enough to spend a log read, and nowhere
+  near enough to claim an add-on terminates outside traffic - which is how
+  Let's Encrypt (holding a Cloudflare API token for DNS challenges) and
+  Pingvin Share (configuring a trusted proxy) ended up filed as entry points.
+  Only parsed routes, the tunnel log markers, or a VPN port earn that tier
+  now. Regression introduced in 1.7.1.
+- **Exporting the map saved an unnamed file.** A detached anchor pointed at a
+  multi-megabyte `data:` URL, which several browsers - the companion app's
+  webview among them - handle by ignoring the download name. The export now
+  goes through a blob URL from an anchor attached to the document, and the
+  object URL is revoked on a later tick so the download isn't cancelled
+  before it starts.
+
 ## [1.7.1] - 2026-09-02
 
 ### Fixed
