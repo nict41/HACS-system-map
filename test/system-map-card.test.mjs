@@ -319,9 +319,14 @@ T("a route to the host's LAN address on an add-on's port resolves to that add-on
 T("the public URL lands on what the tunnel actually reaches",
   [c._node("host").exposedUrl, c._node(addonId("3b88f413_immich")).exposedUrl],
   ["https://ha.example.com", "https://nas.example.com"]);
-T("the tunnel is edged to what it exposes",
-  c._derived.edges.filter((e) => e[0] === addonId("9074a9fa_cloudflared")).map((e) => e[2].label).sort(),
-  ["ha.example.com", "nas.example.com"]);
+// The edge exists but carries no label: the target node already wears the
+// hostname, and printing it twice reads as two different facts.
+T("the tunnel is edged to what it exposes, without repeating the hostname",
+  c._derived.edges
+    .filter((e) => e[0] === addonId("9074a9fa_cloudflared"))
+    .map((e) => [e[1], e[2].label ?? null])
+    .sort(),
+  [["addon_3b88f413_immich", null], ["host", null]]);
 T("an unroutable rule exposes nothing",
   (() => {
     const stray = newCard({}, { logRoutes: [{ hostname: "x.example.com", service: "http://10.9.9.9:80", viaSlug: "9074a9fa_cloudflared" }] });

@@ -8,6 +8,20 @@ was already there in a way an existing dashboard would notice.
 `VERSION` in `system-map-card.js` is the source of truth and CI refuses to
 publish a release whose tag doesn't match it.
 
+## [1.8.1] - 2026-09-02
+
+### Fixed
+
+- **The PNG export had no icons.** An SVG rendered through an `<img>` fetches
+  nothing external, so every add-on icon - a URL into Supervisor - came out
+  blank and each node exported as an empty circle. Icons are now inlined as
+  data URIs before the map is rasterised; one that can't be fetched is
+  dropped rather than failing the export.
+- **A tunnel's edges repeated the hostname already on the node.** The target
+  wears the hostname as its badge and sub-label, so printing it along the
+  edge as well put the same string on screen twice, which reads as two
+  different facts. Those edges are now drawn unlabelled.
+
 ## [1.8.0] - 2026-09-02
 
 ### Fixed

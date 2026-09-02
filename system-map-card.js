@@ -112,7 +112,7 @@
 // version in the console is always the version of the file that's running -
 // which is the first thing worth knowing when a dashboard misbehaves after
 // an update, and the quickest way to catch a stale browser cache.
-const VERSION = "1.8.0";
+const VERSION = "1.8.1";
 
 console.info(
   `%c SYSTEM-MAP-CARD %c v${VERSION} `,
@@ -1212,18 +1212,47 @@ class SystemMapCard extends HTMLElement {
     this.querySelector(".smc-zoom-in").addEventListener("click", () => this._zoomBy(0.8));
     this.querySelector(".smc-zoom-out").addEventListener("click", () => this._zoomBy(1.25));
     this.querySelector(".smc-zoom-reset").addEventListener("click", () => this._resetView());
-    this.querySelector(".smc-export").addEventListener("click", () => this._exportPng());
+    this.querySelector(".smc-export").addEventListener("click", () => {
+      this._exportPng().catch((e) => {
+        this._loadErrors.export = describeError(e);
+        this._renderErrors();
+      });
+    });
   }
 
   // Renders the *whole* map, not the current viewport - the point of an
   // export is the bit that didn't fit on screen. Inlines the computed colours
   // for the handful of CSS custom properties the SVG references, since a
   // detached <img> resolves none of the theme's variables.
-  _exportPng() {
+  async _exportPng() {
     const svg = this.querySelector(".smc-graph svg");
     const nat = this._naturalViewBox;
     if (!svg || !nat) return;
     const clone = svg.cloneNode(true);
+
+    // An SVG rendered through an <img> fetches nothing external, so the
+    // add-on icons - which are URLs into Supervisor - came out blank and
+    // every node was an empty circle. Inline them as data URIs first. A
+    // failure just drops that one icon rather than the export.
+    await Promise.all(
+      [...clone.querySelectorAll("image")].map(async (img) => {
+        const href = img.getAttribute("href") || img.getAttribute("xlink:href");
+        if (!href || href.startsWith("data:")) return;
+        try {
+          const res = await fetch(href);
+          const blob = await res.blob();
+          const dataUri = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
+          });
+          img.setAttribute("href", dataUri);
+        } catch (e) {
+          img.remove();
+        }
+      })
+    );
     clone.setAttribute("viewBox", `${nat.x} ${nat.y} ${nat.w} ${nat.h}`);
     clone.setAttribute("width", nat.w);
     clone.setAttribute("height", nat.h);
@@ -2583,9 +2612,12 @@ class SystemMapCard extends HTMLElement {
     }
 
     // A tunnel's ingress rule is an edge from the way in to what it reaches.
+    // Deliberately unlabelled: the target node already wears the hostname, and
+    // printing it again along the edge just crowds the map with the same
+    // string twice - which reads as two different facts.
     for (const route of routes) {
       if (!route.viaId || !route.targetId || route.viaId === route.targetId) continue;
-      edges.push([route.viaId, route.targetId, { label: route.hostname, dashed: true }]);
+      edges.push([route.viaId, route.targetId, { dashed: true }]);
     }
 
     // An add-on that named another add-on's address in its log depends on
