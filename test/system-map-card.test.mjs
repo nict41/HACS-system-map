@@ -75,7 +75,11 @@ function newCard(config = {}, opts = {}) {
   card._addons = [
     { slug: "core_mosquitto", name: "Mosquitto broker", state: "started" },
     { slug: "45df7312_zigbee2mqtt", name: "Zigbee2MQTT", state: "started", update_available: true },
-    { slug: "core_samba", name: "Samba share", state: "started" },
+    { slug: "c9a35110_sambanas", name: "Samba NAS", state: "started" },
+    { slug: "3b88f413_immich", name: "Immich", state: "started" },
+    { slug: "beb500c8_kiwix", name: "Kiwix", state: "started" },
+    { slug: "a0d7b954_adguard", name: "AdGuard Home", state: "started" },
+    { slug: "9074a9fa_cloudflared", name: "Cloudflared", state: "started" },
     { slug: "a_spare", name: "Some Other Add-on", state: "stopped" },
   ];
   card._entries = [
@@ -109,10 +113,14 @@ function newCard(config = {}, opts = {}) {
   // not by a path, and publishes it over SMB - so it is the mounter, and the
   // add-ons that also reference NAS1 are reaching it through that share.
   card._addonInfoCache = new Map([
-    ["45df7312_zigbee2mqtt", { name: "Zigbee2MQTT", options: { serial: { port: DONGLE.by_id }, mqtt: { server: "mqtt://core-mosquitto" } } }],
+    ["core_mosquitto", { name: "Mosquitto broker", network: { "1883/tcp": 1883 }, options: {} }],
+    ["45df7312_zigbee2mqtt", { name: "Zigbee2MQTT", network: { "8099/tcp": 8099 }, options: { serial: { port: DONGLE.by_id }, mqtt: { server: "mqtt://core-mosquitto:1883" } } }],
     ["c9a35110_sambanas", { name: "Samba NAS", network: { "445/tcp": 445, "139/tcp": 139 }, options: { workgroup: "WORKGROUP", moredisks: ["NAS1"] } }],
     ["3b88f413_immich", { name: "Immich", network: { "3001/tcp": 8080 }, options: { external_library: "/media/NAS1/photos" } }],
     ["beb500c8_kiwix", { name: "Kiwix", options: { zim_dir: "NAS1" } }],
+    ["a0d7b954_adguard", { name: "AdGuard Home", network: { "53/tcp": 53, "3000/tcp": 3000 }, options: {} }],
+    ["9074a9fa_cloudflared", { name: "Cloudflared", network: {}, options: { tunnel_token: "ey...", external_hostname: "" } }],
+    ["a_spare", { name: "Some Other Add-on", options: {} }],
     ...(opts.addonInfo || []),
   ]);
   card._system = {
@@ -120,12 +128,16 @@ function newCard(config = {}, opts = {}) {
     core: { version: "2026.8.1", version_latest: "2026.9.0", update_available: true, arch: "amd64" },
     os: { version: "13.1", board: "generic-x86-64", update_available: false },
     supervisor: { version: "2026.08.0", channel: "stable" },
-    network: { host_internet: true, supervisor_internet: true, interfaces: [{ interface: "enp1s0", type: "ethernet", connected: true, primary: true, ipv4: { address: ["192.168.8.50/24"] } }] },
+    network: { host_internet: true, supervisor_internet: true, interfaces: [{ interface: "enp1s0", type: "ethernet", connected: true, primary: true, ipv4: { address: ["192.168.8.25/24"] } }] },
     backups: [{ slug: "b1", name: "Nightly", date: new Date(Date.now() - 20 * 864e5).toISOString(), size: 512 }],
   };
   card._issues = [{ domain: "hue", issue_id: "bridge_firmware", severity: "warning", is_fixable: true }];
   card._systemHealth = { mqtt: { info: { broker: "core-mosquitto", connected: true } } };
-  card._deriveHardware();
+  card._logRoutes = opts.logRoutes ?? [
+    { hostname: "ha.example.com", service: "http://192.168.8.25:8123", source: "log", viaSlug: "9074a9fa_cloudflared" },
+    { hostname: "nas.example.com", service: "http://192.168.8.25:8080", source: "log", viaSlug: "9074a9fa_cloudflared" },
+  ];
+  card._derive();
   card._buildProblemIndex();
   card._buildCounts();
   return card;
@@ -139,13 +151,15 @@ T("null options fall back rather than disabling", newCard({ show_legend: null })
 T("getStubConfig is the bare type", SystemMapCard.getStubConfig(), { type: "custom:system-map-card" });
 
 // --- hardware discovery ----------------------------------------------------
-T("a drive and a serial dongle become nodes", c._derived.nodes.map((n) => n.label), ["LITEON EP2", "ITead Sonoff Zigbee 3.0"]);
-T("a drive carries its filesystem labels", c._derived.nodes[0].labels, ["NAS1"]);
-T("no discovered node lands on top of the host",
-  c._derived.nodes.some((n) => Math.abs(n.x - 610) < 60 && n.y === 150), false);
+const addonId = (slug) => `addon_${slug.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "")}`;
+const hw = (card = c) => card._derived.nodes.filter((n) => n.kind === "hardware");
+T("a drive and a serial dongle become nodes", hw().map((n) => n.label), ["LITEON EP2", "ITead Sonoff Zigbee 3.0"]);
+T("a drive carries its filesystem labels", hw()[0].labels, ["NAS1"]);
+T("no discovered device lands on top of the host",
+  hw().some((n) => Math.abs(n.x - 610) < 60 && n.y === 150), false);
 T("ownership is derived from the add-on's own nested options",
   c._derived.edges.filter((e) => e[0].startsWith("hw_tty")).map((e) => [e[1], e[2].label]),
-  [["zigbee2mqtt", "owns (serial.port)"]]);
+  [[addonId("45df7312_zigbee2mqtt"), "owns (serial.port)"]]);
 T("every discovered device hangs off the host",
   c._derived.edges.filter((e) => e[0] === "host").length, 2);
 // --- the Samba republish chain --------------------------------------------
@@ -156,16 +170,16 @@ const edgeLabels = (from, to) =>
 T("a disk referenced by filesystem label, not path, is still matched",
   drive().usedBy.find((u) => u.slug === "c9a35110_sambanas")?.option, "moredisks");
 T("the SMB server owns the drive",
-  edgeLabels(drive().id, "samba"), ["serves (moredisks)"]);
+  edgeLabels(drive().id, addonId("c9a35110_sambanas")), ["serves (moredisks)"]);
 T("consumers hang off the share, not the hardware",
-  [edgeLabels(drive().id, "immich"), edgeLabels("samba", "immich")], [[], ["SMB: NAS1"]]);
+  [edgeLabels(drive().id, addonId("3b88f413_immich")), edgeLabels(addonId("c9a35110_sambanas"), addonId("3b88f413_immich"))], [[], ["SMB: NAS1"]]);
 T("a consumer referencing the bare label resolves the same way",
-  edgeLabels("samba", "kiwix"), ["SMB: NAS1"]);
+  edgeLabels(addonId("c9a35110_sambanas"), addonId("beb500c8_kiwix")), ["SMB: NAS1"]);
 T("the drive detail separates who mounts it from who reaches it over SMB",
   drive().usedBy.map((u) => [u.name, u.via, u.share]),
   [["Samba NAS", null, null], ["Immich", "Samba NAS", "NAS1"], ["Kiwix", "Samba NAS", "NAS1"]]);
 T("a serial device with one claimant is still a direct owns edge",
-  edgeLabels(c._derived.nodes.find((n) => n.id.startsWith("hw_tty")).id, "zigbee2mqtt"), ["owns (serial.port)"]);
+  edgeLabels(c._derived.nodes.find((n) => n.id.startsWith("hw_tty")).id, addonId("45df7312_zigbee2mqtt")), ["owns (serial.port)"]);
 
 // Without an SMB server in the picture, every claimant goes back to hanging
 // off the drive directly - the old behaviour, unchanged.
@@ -173,7 +187,7 @@ T("no SMB server means direct edges for everyone",
   (() => {
     const plain = newCard();
     plain._addonInfoCache.set("c9a35110_sambanas", { name: "Samba NAS", options: { moredisks: ["NAS1"] } });
-    plain._deriveHardware();
+    plain._derive();
     const d = plain._derived.nodes.find((n) => n.id.startsWith("hw_drive"));
     return plain._derived.edges.filter((e) => e[0] === d.id).map((e) => e[2].label).sort();
   })(),
@@ -186,8 +200,8 @@ T("a filesystem label under three characters is discarded",
   (() => {
     const short = newCard();
     short._hardware = { devices: [], drives: [{ ...DRIVE, filesystems: [{ device: "/dev/sda1", name: "OK", mount_points: [] }] }] };
-    short._deriveHardware();
-    return short._derived.nodes[0].labels;
+    short._derive();
+    return hw(short)[0].labels;
   })(), []);
 T("a label must be the value or a path's last segment, not a substring",
   [
@@ -203,24 +217,148 @@ T("servesSmb reads published ports, not the add-on name",
 // A drive plus eight dongles needs a second hardware row, and everything
 // below the hardware tier has to move down to make space for it.
 const many = newCard({}, { extraDevices: Array.from({ length: 8 }, (_, i) => ({ ...DONGLE, by_id: `${DONGLE.by_id}_${i}` })) });
-T("hardware wraps to a second row", new Set(many._derived.nodes.map((n) => n.y)).size, 2);
-T("the tiers below are pushed down by exactly one row",
-  many._layout().find((n) => n.id === "zha").y - c._layout().find((n) => n.id === "zha").y, 130);
-T("the hardware tier itself does not move",
-  many._layout().find((n) => n.id === "host").y, 150);
+const tierTop = (card, tier) => Math.min(...card._derived.nodes.filter((n) => n.tier === tier).map((n) => n.y));
+T("hardware wraps to a second row", new Set(hw(many).map((n) => n.y)).size, 2);
+T("the tiers below are pushed down to clear the extra row",
+  tierTop(many, "services") - tierTop(c, "services"), 130);
+T("the host stays put whatever is discovered around it",
+  [many._node("host").y, many._node("host").x], [150, 610]);
 T("discovery off means no hardware nodes and no offset",
-  (() => { const off = newCard({ discover_hardware: false }); return [off._derived.nodes.length, off._layout().find((n) => n.id === "zha").y]; })(),
-  [0, c._layout().find((n) => n.id === "zha").y]);
+  (() => {
+    const off = newCard({ discover_hardware: false });
+    return [hw(off).length, tierTop(off, "services") === tierTop(c, "services")];
+  })(), [0, true]);
+
+// --- reading routes out of a log -------------------------------------------
+// Verbatim from a real remotely-managed cloudflared: the ingress rules only
+// ever appear in the log, as JSON escaped into a quoted log field, and the
+// catch-all rule at the end has a service but no hostname.
+const CLOUDFLARED_LOG = [
+  "[13:58:22] INFO: Using Cloudflare Remote Management Tunnel",
+  "[13:58:22] INFO: All app (add-on) configuration options except tunnel_token will be ignored.",
+  "2026-09-02T12:58:22Z INF Starting tunnel tunnelID=d159e957-5122-42c1-94f5-68964ac4a209",
+  "2026-09-02T12:58:22Z INF Settings: map[metrics:0.0.0.0:36500 no-autoupdate:true token:*****]",
+  '2026-09-02T12:58:22Z INF Updated to new configuration config="{\\"ingress\\":[{\\"hostname\\":\\"ha.nicholastoo.com\\", \\"originRequest\\":{\\"noTLSVerify\\":true}, \\"service\\":\\"http://192.168.8.25:8123\\"}, {\\"hostname\\":\\"nas.nicholastoo.com\\", \\"originRequest\\":{}, \\"service\\":\\"http://192.168.8.25:8080\\"}, {\\"hostname\\":\\"share.nicholastoo.com\\", \\"service\\":\\"http://192.168.8.25:8095\\"}, {\\"service\\":\\"http_status:404\\"}], \\"warp-routing\\":{\\"enabled\\":false}}" version=15',
+  '2026-09-02T12:58:32Z INF precheck component="DNS Resolution" status=pass target=region1.v2.argotunnel.com',
+].join("\n");
+
+T("ingress rules are read out of the log's escaped JSON",
+  ctx.routesFromLog(CLOUDFLARED_LOG).map((r) => [r.hostname, r.service]),
+  [
+    ["ha.nicholastoo.com", "http://192.168.8.25:8123"],
+    ["nas.nicholastoo.com", "http://192.168.8.25:8080"],
+    ["share.nicholastoo.com", "http://192.168.8.25:8095"],
+  ]);
+T("the catch-all rule is not a route", ctx.routesFromLog(CLOUDFLARED_LOG).length, 3);
+T("a later configuration supersedes an earlier one",
+  ctx.routesFromLog(
+    CLOUDFLARED_LOG + '\n2026-09-02T13:00:00Z INF Updated to new configuration config="{\\"ingress\\":[{\\"hostname\\":\\"only.example.com\\", \\"service\\":\\"http://127.0.0.1:99\\"}]}" version=16'
+  ).map((r) => r.hostname), ["only.example.com"]);
+T("a log with no ingress config yields nothing", ctx.routesFromLog("INF nothing to see"), []);
+T("a truncated config line is skipped rather than throwing",
+  ctx.routesFromLog('INF Updated to new configuration config="{\\"ingr'), []);
+T("only an add-on holding a tunnel credential has its log read",
+  [
+    ctx.looksLikeIngressProvider({ tunnel_token: "ey...", external_hostname: "" }),
+    ctx.looksLikeIngressProvider({ workgroup: "WORKGROUP", moredisks: ["NAS1"] }),
+    ctx.looksLikeIngressProvider({ serial: { port: "/dev/ttyUSB0" } }),
+  ], [true, false, false]);
+T("a bare hostname option is a route to Home Assistant itself",
+  ctx.collectRoutes({ external_hostname: "ha.example.com" }).map((r) => [r.hostname, r.service]),
+  [["ha.example.com", "http://homeassistant:8123"]]);
+T("an options-configured tunnel's additional hosts are routes",
+  ctx.collectRoutes({ additional_hosts: [{ hostname: "s.example.com", service: "http://addon_x:3000" }] }).map((r) => r.service),
+  ["http://addon_x:3000"]);
+T("a version string is not mistaken for a hostname",
+  [ctx.looksLikeHostname("1.4.2"), ctx.looksLikeHostname("mqtt"), ctx.looksLikeHostname("ha.example.com")],
+  [false, false, true]);
+
+// --- tiering, routes and layout, all derived -------------------------------
+const tierOf = (card, slug) => card._node(addonId(slug))?.tier;
+T("a DNS server is network infrastructure, by its port",
+  tierOf(c, "a0d7b954_adguard"), "network");
+T("an add-on with no recognised port is a service",
+  [tierOf(c, "3b88f413_immich"), tierOf(c, "beb500c8_kiwix")], ["services", "services"]);
+T("an add-on publishing hostnames for other things is remote access",
+  tierOf(c, "9074a9fa_cloudflared"), "remote");
+T("an SMB server is still a service, not network infrastructure",
+  tierOf(c, "c9a35110_sambanas"), "services");
+T("the role read off the ports reaches the node's notes",
+  c._node(addonId("core_mosquitto")).notes, ["Publishes MQTT broker"]);
+
+// The tunnel points at the host's own LAN address, which is how a remotely
+// managed cloudflared writes its rules - so routes resolve by port.
+T("a route to the host's LAN address on 8123 resolves to the host",
+  c._routes.find((r) => r.hostname === "ha.example.com")?.targetId, "host");
+T("a route to the host's LAN address on an add-on's port resolves to that add-on",
+  c._routes.find((r) => r.hostname === "nas.example.com")?.targetId, addonId("3b88f413_immich"));
+T("the public URL lands on what the tunnel actually reaches",
+  [c._node("host").exposedUrl, c._node(addonId("3b88f413_immich")).exposedUrl],
+  ["https://ha.example.com", "https://nas.example.com"]);
+T("the tunnel is edged to what it exposes",
+  c._derived.edges.filter((e) => e[0] === addonId("9074a9fa_cloudflared")).map((e) => e[2].label).sort(),
+  ["ha.example.com", "nas.example.com"]);
+T("an unroutable rule exposes nothing",
+  (() => {
+    const stray = newCard({}, { logRoutes: [{ hostname: "x.example.com", service: "http://10.9.9.9:80", viaSlug: "9074a9fa_cloudflared" }] });
+    return stray._routes[0].targetId;
+  })(), null);
+
+// Z2M's options name the broker: `mqtt://core-mosquitto:1883`.
+T("one add-on naming another in its options becomes an edge",
+  c._derived.edges.find((e) => e[0] === addonId("45df7312_zigbee2mqtt") && e[1] === addonId("core_mosquitto"))?.[2].label,
+  "mqtt.server");
+T("an add-on is not edged to itself",
+  c._derived.edges.every((e) => e[0] !== e[1]), true);
+
+T("a router integration is placed in the network tier by its device_tracker source_type",
+  (() => {
+    const net = newCard();
+    net._entries.push({ entry_id: "e_router", domain: "asusrouter", title: "ASUS Router", state: "loaded" });
+    net._entityRegistry.push({ entity_id: "device_tracker.phone", platform: "asusrouter", config_entry_id: "e_router" });
+    net._hass.states["device_tracker.phone"] = { state: "home", attributes: { source_type: "router" } };
+    net._derive();
+    const node = net._derived.nodes.find((n) => n.kind === "integration" && n.domain === "asusrouter");
+    return [node?.tier, node?.notes[0]];
+  })(), ["network", "Reports 1 device as present on the network"]);
+T("an integration with no router evidence stays in the grid",
+  c._derived.nodes.some((n) => n.kind === "integration"), false);
+
+T("every node gets a position",
+  c._derived.nodes.every((n) => Number.isFinite(n.x) && Number.isFinite(n.y)), true);
+T("tiers stack in order down the page",
+  (() => {
+    const tops = ["hardware", "services", "network", "remote"]
+      .map((t) => c._derived.nodes.filter((n) => n.tier === t))
+      .filter((ns) => ns.length)
+      .map((ns) => Math.min(...ns.map((n) => n.y)));
+    return tops.every((y, i) => i === 0 || y > tops[i - 1]);
+  })(), true);
+T("layout is stable across repeated derivation",
+  (() => {
+    const before = c._derived.nodes.map((n) => `${n.id}@${n.x},${n.y}`).join("|");
+    c._derive();
+    return c._derived.nodes.map((n) => `${n.id}@${n.x},${n.y}`).join("|") === before;
+  })(), true);
+T("add-ons placed in a tier are not repeated in the leftovers grid",
+  (() => {
+    c._renderGraph();
+    return c._addons.every((a) => !c._nodePositions.has(`addon:${a.slug}`));
+  })(), true);
 
 // --- problem join ----------------------------------------------------------
-T("a dead mqtt entity flags the add-on nodes that serve it",
-  c._problemFor("node:zigbee2mqtt"), { severity: "bad", label: "1/2 unavailable", badge: "1", reason: "1 of 2 entities are unavailable or unknown" });
+// The mqtt entities resolve to whichever add-on publishes 1883 - derived
+// from the port, with no table saying which add-on that is here.
+T("a dead mqtt entity flags the add-on that serves the protocol",
+  c._problemFor(`node:${addonId("core_mosquitto")}`),
+  { severity: "bad", label: "1/2 unavailable", badge: "1", reason: "1 of 2 entities are unavailable or unknown" });
 T("an open repair issue flags its integration",
   c._problemFor("entry:e_hue")?.label, "1 repair issue");
 T("a healthy integration is not flagged", c._problemFor("entry:e_mjpeg"), null);
-T("problem highlighting can be turned off", newCard({ highlight_problems: false })._problemFor("node:zigbee2mqtt"), null);
+T("problem highlighting can be turned off",
+  newCard({ highlight_problems: false })._problemFor(`node:${addonId("core_mosquitto")}`), null);
 T("system health lands on the node its domain resolves to",
-  c._problems.get("node:mosquitto")?.health, { broker: "core-mosquitto", connected: true });
+  c._problems.get(`node:${addonId("core_mosquitto")}`)?.health, { broker: "core-mosquitto", connected: true });
 
 // --- counts ----------------------------------------------------------------
 T("entity and device counts per node",
@@ -234,7 +372,8 @@ T("the grouped layout files an integration under its busiest area",
     two._buildCounts();
     return two._groupByArea([{ kind: "entry", key: "e_hue", label: "hue" }]).map(([n]) => n);
   })(), ["Lounge"]);
-T("counts reach the node sub-label", c._nodeState(c._layout().find((n) => n.id === "mosquitto")).sub, "1/2 unavailable");
+T("counts reach the node sub-label",
+  c._nodeState(c._node(addonId("core_mosquitto"))).sub, "1/2 unavailable");
 
 // --- status bar ------------------------------------------------------------
 const status = Object.fromEntries(c._statusItems().map((i) => [i.key, i]));
@@ -481,7 +620,7 @@ T("a config change keeps the fetched data",
     const before = live._addons.length;
     live.setConfig({ type: "custom:system-map-card", title: "Renamed" });
     return [before, live._addons.length, live._entries.length];
-  })(), [4, 4, 4]);
+  })(), [8, 8, 4]);
 
 // --- editor ----------------------------------------------------------------
 const editor = new SystemMapCardEditor();

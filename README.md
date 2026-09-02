@@ -43,16 +43,29 @@ a count.
 - **Problem detection**: any node serving unavailable entities gets a red
   ring and an `n/total unavailable` count; open repair issues and System
   Health data land on the node for their domain
-- **Discovered hardware**: drives and serial devices come from Supervisor's
-  `/hardware/info`, and ownership edges are derived by finding the device's
-  by-id path, mount point *or filesystem label* in an add-on's own options -
-  the edge is labelled with the option that matched, e.g. `owns
-  (serial.port)` or `serves (moredisks)`
-- **Re-published shares are followed**: where one add-on mounts a disk and
-  serves it over SMB (detected from its published ports, not its name), the
-  other add-ons referencing that disk are drawn downstream of the *share*
-  rather than hanging off the hardware - which is the dependency that
-  actually breaks when that add-on stops
+- **Nothing is hand-placed.** Every node, edge, tier and position is derived
+  from the instance's own data, so the card is the same code on your setup as
+  on anyone else's:
+  - **Hardware** from Supervisor's `/hardware/info`, with ownership edges
+    found by matching a device's by-id path, mount point *or filesystem
+    label* against each add-on's own options - the edge is labelled with the
+    option that matched, e.g. `owns (serial.port)` or `serves (moredisks)`
+  - **Re-published shares are followed**: where one add-on mounts a disk and
+    serves it over SMB (detected from its published ports, not its name), the
+    add-ons referencing that disk are drawn downstream of the *share* rather
+    than hanging off the hardware - the dependency that actually breaks when
+    that add-on stops
+  - **Tiers from ports**: 53 is network infrastructure, a VPN port is remote
+    access, an add-on publishing hostnames for other things is a way in
+  - **Service edges** from the add-ons an add-on names in its own options
+    (`mqtt://core-mosquitto:1883` becomes an edge labelled `mqtt.server`)
+  - **Public URLs** from the tunnel add-on that routes them, read from its
+    options, or from its log when the tunnel is managed remotely and the
+    rules never touch disk
+  - **Routers** from integrations reporting `device_tracker` entities with
+    `source_type: router`
+  - **Positions** by a barycentre pass that keeps connected nodes near each
+    other, not by hand-written coordinates
 - **Live resource use**: per-add-on CPU, memory, network and disk I/O in the
   detail panel, fetched on click; optional log tail alongside it
 - **Counts**: devices, entities and areas per node, from the registries
@@ -115,18 +128,20 @@ joins and the entity finder - carries on working.
 
 Releases follow [semantic versioning](https://semver.org/) and are listed in
 [CHANGELOG.md](CHANGELOG.md). `VERSION` in `system-map-card.js` is the source
-of truth: it's shown in the card header, logged to the browser console on
-load, and CI refuses to publish a release whose tag disagrees with it.
+of truth: it's shown in the card header and logged to the browser console on
+load.
 
-To cut a release: bump `VERSION`, add a `CHANGELOG.md` entry, then
+**Releases are automatic.** Bump `VERSION`, add a `CHANGELOG.md` entry, and
+push to `main`; the `Release` workflow runs the tests, creates the tag and
+publishes the release. Nothing else to do - and because HACS installs from
+releases, that's also what makes the update appear in HACS rather than
+needing a manual redownload.
 
-```
-git tag v1.2.3 && git push origin v1.2.3
-```
-
-The `Release` workflow checks the tag against `VERSION`, runs the tests, and
-creates the GitHub release. HACS installs from releases, so this is also what
-makes the update appear in HACS rather than needing a manual redownload.
+If a version has already been released the workflow does nothing, so ordinary
+commits that don't touch `VERSION` are free. Publishing a release from the
+GitHub website works too (Releases → Draft a new release → create the tag on
+publish); the workflow attaches the card to it. A tag pushed by hand is
+checked against `VERSION` and refused if the two disagree.
 
 ## Development
 

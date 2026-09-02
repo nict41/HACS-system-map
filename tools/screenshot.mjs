@@ -67,6 +67,20 @@ const STATES = Object.fromEntries([
   ["update.home_assistant_core_update", { state: "on", attributes: { friendly_name: "Home Assistant Core" } }],
 ]);
 
+// Verbatim shape of a remotely-managed cloudflared's log: the ingress rules
+// arrive as JSON escaped into a quoted log field, pointing at the host's own
+// LAN address and a port per service.
+const CLOUDFLARED_LOG = [
+  "[13:58:22] INFO: Using Cloudflare Remote Management Tunnel",
+  "[13:58:22] INFO: All app (add-on) configuration options except tunnel_token will be ignored.",
+  '2026-09-02T12:58:22Z INF Updated to new configuration config="{\\"ingress\\":[' +
+    '{\\"hostname\\":\\"ha.example.com\\", \\"service\\":\\"http://192.168.8.25:8123\\"}, ' +
+    '{\\"hostname\\":\\"nas.example.com\\", \\"service\\":\\"http://192.168.8.25:8080\\"}, ' +
+    '{\\"hostname\\":\\"example.com\\", \\"service\\":\\"http://192.168.8.25:5051\\"}, ' +
+    '{\\"hostname\\":\\"share.example.com\\", \\"service\\":\\"http://192.168.8.25:8095\\"}, ' +
+    '{\\"service\\":\\"http_status:404\\"}]}" version=15',
+].join("\n");
+
 const now = Date.now();
 const RESPONSES = {
   "/addons": { addons: ADDONS },
@@ -103,6 +117,7 @@ const page = `<!doctype html><html><head><meta charset="utf-8"><style>
 <script>${cardSource}</script>
 <script>
   const ADDONS = ${JSON.stringify(ADDONS)};
+  const CLOUDFLARED_LOG = ${JSON.stringify(CLOUDFLARED_LOG)};
   const RESPONSES = ${JSON.stringify(RESPONSES)};
   const ENTRIES = ${JSON.stringify(ENTRIES)};
   const ENTITIES = ${JSON.stringify(ENTITIES)};
@@ -114,6 +129,9 @@ const page = `<!doctype html><html><head><meta charset="utf-8"><style>
         if (msg.type === "supervisor/api") {
           const key = msg.endpoint.replace(/\\/addons\\/[^/]+\\/(info|stats|logs)$/, "");
           if (msg.endpoint in RESPONSES) return { data: RESPONSES[msg.endpoint] };
+          if (msg.endpoint.endsWith("/logs")) {
+            return msg.endpoint.includes("cloudflared") ? CLOUDFLARED_LOG : "";
+          }
           if (msg.endpoint.endsWith("/info")) {
             const slug = msg.endpoint.split("/")[2];
             // Samba mounts the drive by label and publishes it on 445; Immich
@@ -121,10 +139,18 @@ const page = `<!doctype html><html><head><meta charset="utf-8"><style>
             // way so the screenshot shows the republish chain, which is the
             // part of the derivation that is hardest to describe in words.
             const ADDON_OPTIONS = {
-              "45df7312_zigbee2mqtt": { options: { serial: { port: RESPONSES["/hardware/info"].devices[0].by_id } } },
+              "45df7312_zigbee2mqtt": { network: { "8099/tcp": 8099 }, options: { serial: { port: RESPONSES["/hardware/info"].devices[0].by_id }, mqtt: { server: "mqtt://core-mosquitto:1883" } } },
+              core_mosquitto: { network: { "1883/tcp": 1883, "8883/tcp": 8883 }, options: {} },
               c9a35110_sambanas: { network: { "445/tcp": 445, "139/tcp": 139 }, options: { workgroup: "WORKGROUP", moredisks: ["NAS1"] } },
-              "3b88f413_immich": { options: { external_library: "/media/NAS1/photos" } },
+              "3b88f413_immich": { network: { "3001/tcp": 8080 }, options: { external_library: "/media/NAS1/photos" } },
               beb500c8_kiwix: { options: { zim_dir: "NAS1" } },
+              a0d7b954_adguard: { network: { "53/tcp": 53, "3000/tcp": 3000 }, options: {} },
+              a0d7b954_tailscale: { network: { "41641/udp": 41641 }, options: {} },
+              // Remotely managed, so its options say nothing and the routes
+              // are only in the log - the case the log parser exists for.
+              "9074a9fa_cloudflared": { network: {}, options: { tunnel_token: "ey..." } },
+              beb500c8_wordpress: { network: { "80/tcp": 5051 }, options: {} },
+              beb500c8_pingvin_share: { network: { "3000/tcp": 8095 }, options: {} },
             };
             const name = (ADDONS.find((a) => a.slug === slug) || {}).name || slug;
             return { data: { name, state: "started", version: "1.4.2", options: {}, ...(ADDON_OPTIONS[slug] || {}) } };

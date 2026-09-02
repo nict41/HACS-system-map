@@ -8,6 +8,44 @@ was already there in a way an existing dashboard would notice.
 `VERSION` in `system-map-card.js` is the source of truth and CI refuses to
 publish a release whose tag doesn't match it.
 
+## [1.2.0] - 2026-09-02
+
+### Changed
+
+- **The map is now fully derived.** The hand-written layout, edges and role
+  text are gone: there is no longer any node, position or relationship in the
+  source that describes one particular home lab. The card is the same code on
+  every instance, and a change to the system redraws it rather than making it
+  wrong. What replaced each piece:
+  - Node positions: a barycentre pass that places a node near the average
+    position of what it connects to, tier by tier down the page.
+  - Tiers: the ports an add-on publishes. 53 or 67 is network
+    infrastructure; a VPN port is remote access; an add-on that publishes
+    hostnames for other things is a way in. Anything else is a service,
+    which is the honest default.
+  - Add-on to add-on edges: the identifiers add-ons use for each other in
+    their own options, so `mqtt://core-mosquitto:1883` becomes an edge
+    labelled `mqtt.server`.
+  - Public URLs and the remote-access tier: the ingress rules of whichever
+    add-on is serving tunnels. Read from its options where they live there,
+    and **from its log where they don't** - a Cloudflare tunnel can be
+    managed from Cloudflare's dashboard, in which case the add-on says so
+    itself and the rules only ever appear in the running log. A rule pointing
+    at the host's own LAN address is resolved by port to the add-on
+    publishing it.
+  - Routers: integrations reporting `device_tracker` entities with
+    `source_type: router`, which is the one signal for "network
+    infrastructure" that doesn't need the integration to be known by name.
+  - Role text: generated from the derived facts.
+  The only built-in knowledge left is `PORT_ROLES` and
+  `DOMAIN_SERVICE_PORTS`, and both are about protocols - what a container
+  publishing 53 or 445 or 1883 must be - never about anyone's particular
+  add-ons.
+- Every add-on is now a node in its tier, so the separate "other add-ons"
+  grid is empty on a normal instance.
+- Releases are cut automatically when `VERSION` changes on `main`, rather
+  than needing a tag to be pushed by hand.
+
 ## [1.1.2] - 2026-09-02
 
 ### Fixed

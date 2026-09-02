@@ -1,20 +1,20 @@
 name: Release
 
-# HACS installs a plugin from a GitHub *release*, not from a bare tag.
+# HACS installs a plugin from a GitHub *release*, not from a bare tag, and it
+# is the release that makes an update appear in HACS at all. So a release is
+# cut automatically whenever VERSION changes on main - bump VERSION in the
+# commit and the release follows, with no second step to forget.
 #
-# Either route works and both end up here:
-#   - From the website: Releases -> "Draft a new release" -> type the tag in
-#     "Choose a tag" -> "Create new tag on publish" -> Publish. Publishing
-#     creates the tag, which fires this workflow.
-#   - From a terminal: git tag v1.2.3 && git push origin v1.2.3
-#
-# So this workflow must cope with the release already existing by the time it
-# runs. It attaches the card to whichever release is there rather than
-# failing, and still checks the tag against VERSION either way.
+# Three routes, all of which end up here and all of which are safe to repeat:
+#   - Push to main with a new VERSION -> tag and release created here.
+#   - Publish from the website (Releases -> Draft a new release -> create the
+#     tag on publish) -> the card is attached to the release you made.
+#   - git tag v1.2.3 && git push origin v1.2.3 -> same, from a terminal.
 on:
   push:
-    tags:
-      - "v*"
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -25,32 +25,62 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # A release whose tag disagrees with the VERSION the card reports would
-      # make every future "what version are you running" answer a lie, so
-      # this fails the release rather than publishing the mismatch.
-      - name: Check the tag matches VERSION in the card
+      - name: Work out the version and tag
+        id: v
         run: |
-          tag="${GITHUB_REF_NAME#v}"
           version="$(sed -n 's/^const VERSION = "\(.*\)";$/\1/p' system-map-card.js)"
-          if [ "$tag" != "$version" ]; then
-            echo "::error::tag ${GITHUB_REF_NAME} does not match VERSION \"${version}\" in system-map-card.js"
+          if [ -z "$version" ]; then
+            echo "::error::could not read VERSION from system-map-card.js"
             exit 1
           fi
-          echo "Releasing ${GITHUB_REF_NAME} (VERSION ${version})"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tag="${GITHUB_REF_NAME}"
+            # A release whose tag disagrees with the version the card reports
+            # would make every future "what are you running" answer a lie.
+            if [ "${tag#v}" != "$version" ]; then
+              echo "::error::tag ${tag} does not match VERSION \"${version}\" in system-map-card.js"
+              exit 1
+            fi
+          else
+            tag="v${version}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Version $version, tag $tag"
 
-      - name: Run the tests
-        run: node test/system-map-card.test.mjs
-
-      - name: Create or update the release
+      - name: Skip if this version was already released
+        id: check
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
-            echo "Release ${GITHUB_REF_NAME} already exists (published from the website); attaching the card to it."
-            gh release upload "${GITHUB_REF_NAME}" system-map-card.js --clobber
+          if gh release view "${{ steps.v.outputs.tag }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "${{ steps.v.outputs.tag }} is already released."
           else
-            gh release create "${GITHUB_REF_NAME}" \
-              --title "${GITHUB_REF_NAME}" \
-              --generate-notes \
-              system-map-card.js
+            echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
+
+      # A release is only ever cut from code that passes, whichever route
+      # triggered it.
+      - name: Run the tests
+        if: steps.check.outputs.exists == 'false' || github.ref_type == 'tag'
+        run: node test/system-map-card.test.mjs
+
+      - name: Create the release
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # --target pins the tag to this commit, so pushing to main creates
+          # the tag as well as the release.
+          gh release create "${{ steps.v.outputs.tag }}" \
+            --target "${GITHUB_SHA}" \
+            --title "${{ steps.v.outputs.tag }}" \
+            --generate-notes \
+            system-map-card.js
+
+      - name: Attach the card to a release published from the website
+        if: steps.check.outputs.exists == 'true' && github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ steps.v.outputs.tag }}" system-map-card.js --clobber

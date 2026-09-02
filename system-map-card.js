@@ -60,37 +60,33 @@
 // instance without the Supervisor degrades to the curated map rather than
 // breaking.
 //
-// The hardware tier and its ownership edges ARE computed live: devices come
-// from Supervisor's /hardware/info, and "which add-on owns this dongle" is
-// read off that add-on's own options (findPathInOptions looks for the
-// device's by-id path or mount point anywhere in the options tree, and
-// labels the edge with the option key that matched - `owns (serial.port)`).
-// So moving a dongle redraws the map instead of making it wrong. A device
-// no add-on claims says so, rather than being quietly left unconnected.
+// Nothing on this map is hand-placed. The hardware tier comes from
+// Supervisor's /hardware/info; which add-on owns a device is read out of that
+// add-on's own options (findDeviceInOptions looks for the device's by-id
+// path, mount point or filesystem label anywhere in the options tree, and
+// labels the edge with the option key that matched - `owns (serial.port)`,
+// `serves (moredisks)`). An add-on's tier comes from the ports it publishes,
+// its edges from the other add-ons it names in its options, and its public
+// URL from whichever tunnel add-on is routing a hostname to its port. Node
+// positions are computed by a barycentre pass, not authored.
 //
-// What this card still does NOT compute live: the *service/network/remote*
-// edges, the *role* text, and the *entity->node* overrides (HUB_EDGES /
-// ROLES / PLATFORM_TO_NODES below) - hand-written from reading add-on
-// options, automation YAML, live add-on logs, external DNS/HTTPS probes,
-// and the household's own account of their physical wiring. Two flagged
-// uncertainties baked into the text rather than silently asserted:
-//   - AdGuard: HA's own host network config and Supervisor's DNS fallback
-//     are both explicitly set to 1.1.1.1/8.8.8.8, not AdGuard's address -
-//     checked directly via `ha network info` / `ha dns info`, not assumed.
-//   - Huawei-as-primary-uplink: stated by the household, not independently
-//     verifiable from HA's data.
-// Cloudflare Tunnel routes ARE independently confirmed (2026-09-02): grepped
-// the add-on's own logs for ingress-rule origins, then probed DNS + HTTPS
-// directly against each hostname - 4 routes confirmed this way:
-// nicholastoo.com -> WordPress, ha. -> Home Assistant, share. -> Pingvin
-// Share, nas. -> Immich (each response body checked, not just DNS/HTTP 200,
-// to rule out a wildcard-DNS false positive).
+// The one piece of built-in knowledge is PORT_ROLES and DOMAIN_SERVICE_PORTS
+// below, and that is about protocols - what a container publishing 53 or 445
+// or 1883 must be - never about anybody's particular add-ons. So the map is
+// the same code on every instance, and moving a dongle or adding a tunnel
+// route redraws it rather than making it wrong.
+//
+// External routes are read from a tunnel add-on's options where they live
+// there, and from its log where they don't: a Cloudflare tunnel can be
+// managed from Cloudflare's dashboard, in which case the add-on says so
+// itself ("All app configuration options except tunnel_token will be
+// ignored") and the ingress rules only ever appear in the running log.
 //
 // The entity finder is necessarily approximate: HA's entity registry records
 // which *integration* (platform) created an entity, not which add-on. For
 // platforms with an unambiguous single add-on (mqtt -> Zigbee2MQTT +
 // Mosquitto, huawei_lte -> the Huawei node, etc.) that's a reliable
-// mapping - see PLATFORM_TO_NODES. Helper integrations that wrap another
+// mapping - see DOMAIN_SERVICE_PORTS. Helper integrations that wrap another
 // entity (switch_as_x is the confirmed case here - its config entry stores
 // `options.entity_id` pointing at the wrapped entity) are resolved through
 // to that source entity first, generically, by following `options.entity_id`
@@ -100,7 +96,7 @@
 // with no curated node falls back to the entity's own config entry, and
 // every config entry is drawn as a node in the auto-generated "Integrations"
 // grid. So "isn't modeled as a node on this map" - which any entity outside
-// the hand-written PLATFORM_TO_NODES table used to hit, camera.* served by
+// a hand-written platform table used to hit, camera.* served by
 // MJPEG among them - is no longer a reachable answer for an entity backed by
 // a config entry. The one honest remaining miss is an entity from a
 // YAML-configured platform that has no config entry at all, which the finder
@@ -116,7 +112,7 @@
 // version in the console is always the version of the file that's running -
 // which is the first thing worth knowing when a dashboard misbehaves after
 // an update, and the quickest way to catch a stale browser cache.
-const VERSION = "1.1.2";
+const VERSION = "1.2.0";
 
 console.info(
   `%c SYSTEM-MAP-CARD %c v${VERSION} `,
@@ -170,47 +166,13 @@ const ICON_PATHS = {
 // rather than a force-directed graph - predictable and legible without a
 // graphing library; zoom/pan makes a bigger canvas practical. Each node's
 // `icon` is a key into ICON_PATHS above.
-const HUB_LAYOUT = [
-  // hardware
-  // The hardware tier is discovered at runtime from Supervisor's
-  // /hardware/info (see _deriveHardware) - only the host itself is pinned,
-  // since it's the one node everything else hangs off. x/y here are the
-  // host's slot in the hardware row; the discovered devices lay themselves
-  // out around it.
-  // x is column 3 of the hardware row (see hwColX) so the host sits centred
-  // among whatever devices get discovered around it.
-  { id: "host", label: "HA Server", x: 610, y: 150, r: 62, kind: "host", tier: "hardware", icon: "chip", exposedUrl: "https://ha.nicholastoo.com" },
-
-  // services using that hardware
-  { id: "zigbee2mqtt", label: "Zigbee2MQTT", x: 280, y: 330, r: 46, kind: "addon", slug: "45df7312_zigbee2mqtt", deviceCountDomain: "mqtt", tier: "services", icon: "zigbee" },
-  { id: "claude_code", label: "Claude Code", x: 620, y: 330, r: 42, kind: "addon", slug: "7b7df7b9_claudecode", tier: "services", icon: "robot" },
-  { id: "samba", label: "Samba NAS-β", x: 960, y: 330, r: 46, kind: "addon", slug: "c9a35110_sambanas", tier: "services", icon: "folder-network" },
-  { id: "zha", label: "ZHA", x: 120, y: 420, r: 24, kind: "integration", domain: "zha", deviceCountDomain: "zha", tier: "services", icon: "close-network-outline" },
-  { id: "nas1_watcher", label: "NAS1 Watcher", x: 1150, y: 320, r: 26, kind: "addon", slug: "beb500c8_nas1_usb_watcher", tier: "services", icon: "pulse" },
-  { id: "immich", label: "Immich", x: 900, y: 480, r: 40, kind: "addon", slug: "3b88f413_immich", tier: "services", icon: "image-multiple", exposedUrl: "https://nas.nicholastoo.com" },
-  { id: "immich_ml", label: "Immich ML", x: 900, y: 585, r: 24, kind: "addon", slug: "beb500c8_immich_ml", tier: "services", icon: "brain" },
-  { id: "kiwix", label: "Kiwix", x: 1060, y: 480, r: 36, kind: "addon", slug: "beb500c8_kiwix", tier: "services", icon: "book-open-page-variant" },
-
-  // LAN-wide network infrastructure
-  { id: "adguard", label: "AdGuard Home", x: 260, y: 740, r: 44, kind: "addon", slug: "a0d7b954_adguard", tier: "network", icon: "shield-check" },
-  { id: "mosquitto", label: "Mosquitto (MQTT)", x: 460, y: 740, r: 44, kind: "addon", slug: "core_mosquitto", tier: "network", icon: "access-point-network" },
-  { id: "asusrouter", label: "ASUS Router", x: 660, y: 740, r: 44, kind: "integration", domain: "asusrouter", tier: "network", icon: "router-wireless" },
-  { id: "huawei", label: "Huawei LTE", x: 860, y: 740, r: 44, kind: "integration", domain: "huawei_lte", badge: "Internet source", tier: "network", icon: "antenna" },
-
-  // remote access: entry & exit points, + what's exposed through them
-  { id: "tailscale", label: "Tailscale", x: 380, y: 910, r: 44, kind: "addon", slug: "a0d7b954_tailscale", badge: "Remote entry", tier: "remote", icon: "vpn" },
-  { id: "cloudflared", label: "Cloudflared", x: 700, y: 910, r: 44, kind: "addon", slug: "9074a9fa_cloudflared", badge: "Remote entry", tier: "remote", icon: "cloud-outline" },
-  { id: "wordpress", label: "WordPress", x: 520, y: 1050, r: 34, kind: "addon", slug: "beb500c8_wordpress", tier: "remote", icon: "wordpress", exposedUrl: "https://nicholastoo.com" },
-  { id: "pingvin", label: "Pingvin Share", x: 660, y: 1050, r: 34, kind: "addon", slug: "beb500c8_pingvin_share", tier: "remote", icon: "share-variant", exposedUrl: "https://share.nicholastoo.com" },
-  // Note: Immich (nas.nicholastoo.com) is also exposed via Cloudflared, but
-  // it already exists as a node in the "services" tier above - see
-  // HUB_EDGES for the cloudflared->immich edge - so no second node here.
-];
-
+// The tiers, top to bottom. A node's tier is decided by evidence (see
+// PORT_ROLES) rather than declared, but the order they stack in, and what
+// each one is called, is a presentation choice.
 const TIER_ORDER = ["hardware", "services", "network", "remote"];
 const TIER_META = {
   hardware: "Physical hardware",
-  services: "Services using that hardware",
+  services: "Services",
   network: "Network infrastructure (LAN)",
   remote: "Remote access / entry & exit points",
 };
@@ -224,77 +186,153 @@ const TIER_COLORS = {
 };
 const OTHER_GRID_COLOR = "#78909c"; // neutral - not a real "tier", just leftovers
 
-// [from, to, {label?, dashed?}] - drawn under the node circles so trimming
-// the line to the circle edge isn't needed, the circle just covers the end.
-const HUB_EDGES = [
-  ["samba", "host", { dashed: true, label: "NAS1 (SMB loop)" }],
-  ["zigbee2mqtt", "mosquitto", { label: "MQTT" }],
-  ["zigbee2mqtt", "zha", { dashed: true, label: "ignored" }],
-  ["immich", "immich_ml", { label: "ML sidecar" }],
-  ["host", "claude_code", { label: "admin access" }],
-  ["asusrouter", "adguard", { label: "DNS" }],
-  ["asusrouter", "huawei", { dashed: true, label: "WAN uplink" }],
-  ["cloudflared", "wordpress", { label: "nicholastoo.com" }],
-  ["cloudflared", "pingvin", { label: "share.nicholastoo.com" }],
-  ["cloudflared", "host", { dashed: true, label: "ha.nicholastoo.com" }],
-  ["cloudflared", "immich", { dashed: true, label: "nas.nicholastoo.com" }],
+// What a container publishes says what it is, on any instance - so tiering
+// is decided by ports and by evidence, never by an add-on's name or slug.
+// This table is the only domain knowledge the card carries, and it is about
+// protocols rather than about anyone's particular add-ons.
+const PORT_ROLES = [
+  { port: 53, role: "DNS resolver", tier: "network" },
+  { port: 67, role: "DHCP server", tier: "network" },
+  { port: 68, role: "DHCP server", tier: "network" },
+  { port: 51820, role: "WireGuard VPN", tier: "remote" },
+  { port: 41641, role: "Tailscale", tier: "remote" },
+  { port: 1194, role: "OpenVPN", tier: "remote" },
+  { port: 445, role: "SMB file server" },
+  { port: 139, role: "SMB file server" },
+  { port: 2049, role: "NFS server" },
+  { port: 1883, role: "MQTT broker" },
+  { port: 8883, role: "MQTT broker (TLS)" },
+  { port: 3306, role: "MySQL / MariaDB" },
+  { port: 5432, role: "PostgreSQL" },
+  { port: 6379, role: "Redis" },
+  { port: 22, role: "SSH" },
+  { port: 5353, role: "mDNS" },
 ];
 
-// One-sentence-or-two "why" per hub node, shown at the top of its
-// click-detail panel. Hand-written and hand-verified, same reasoning as
-// HUB_EDGES above - including two flagged uncertainties, see file header.
-const ROLES = {
-  host: "The physical server itself - an Intel N100 mini-PC running Home Assistant OS. Every add-on and integration on this map runs on it as a Docker container.",
-  zigbee2mqtt: "Owns the Sonoff USB dongle and runs the Zigbee coordinator network, bridging Zigbee end devices (lights, sensors, blinds, plugs, etc.) to Home Assistant over MQTT.",
-  claude_code: "Runs Claude (this AI assistant) inside Home Assistant. Has full read/write access to the /homeassistant config directory and the same Supervisor admin API this card itself uses - effectively admin-level access to everything on this map.",
-  samba: "Owns the external USB HDD and shares it on the LAN as an SMB/CIFS share ('NAS1'). Home Assistant itself also mounts that same share back over the network - a loop - for other add-ons to read.",
-  zha: "A dismissed Zigbee integration discovery for the same dongle - never actually set up, owns 0 devices. Not a real path; Zigbee2MQTT above is what actually runs the mesh.",
-  nas1_watcher: "Polls the external HDD's raw USB port every 5s and publishes a binary_sensor over MQTT when the physical USB link itself drops or recovers - lower-level than the Samba share; it watches the electrical connection, not the network mount.",
-  immich: "Self-hosted photo/video library. Primary storage is internal, plus the external USB HDD (NAS1) is connected in as an External Library inside Immich's own settings. Also exposed to the internet via Cloudflare Tunnel.",
-  immich_ml: "GPU-accelerated (Intel iGPU, OpenVINO) machine-learning sidecar for Immich - offloads face detection and smart search from Immich's main process.",
-  kiwix: "Offline Wikipedia/ZIM archive server - reads its article archives straight off the external USB HDD (NAS1).",
-  adguard: "Serves DNS for the LAN - the ASUS router hands this add-on's IP out via DHCP to every device on the network, and it blocks ads/trackers via its own blocklist subscriptions. Flagged: HA's own network config and Supervisor's DNS fallback are both explicitly set to 1.1.1.1/8.8.8.8, not this add-on's address - so unlike other LAN devices, the HA server itself doesn't appear to route its own DNS through AdGuard. Worth checking if that's intentional.",
-  mosquitto: "The MQTT message broker - the hub Zigbee2MQTT and Home Assistant Core both publish/subscribe through for every Zigbee device's state.",
-  asusrouter: "Main LAN gateway and DHCP server (192.168.8.1) - hands out AdGuard as the DNS server to every device on the network.",
-  huawei: "The primary internet connection into this whole network (4G/5G uplink) - per the household's own wiring, the ASUS router's WAN side plugs into this rather than a fixed line. Also used for SMS. Flagged: HA's data can't independently confirm physical WAN cabling, so this is stated, not measured.",
-  tailscale: "A remote entry point into this network: a VPN mesh (tailnet), configured as a subnet router + exit node + app connector, so it extends this entire LAN to your authorized Tailscale devices anywhere, and can route their internet traffic back out through this connection too.",
-  cloudflared: "A remote entry point into this network: Cloudflare Tunnel, exposing selected internal services to the public internet as subdomains under nicholastoo.com, with no ports opened on the router. Confirmed live routes (checked via add-on logs + DNS/HTTPS probe, response body verified for each): nicholastoo.com → WordPress, ha.nicholastoo.com → Home Assistant itself, share.nicholastoo.com → Pingvin Share, nas.nicholastoo.com → Immich.",
-  wordpress: "Public site, exposed to the internet via Cloudflare Tunnel. Bundles its own internal database, separate from the standalone (stopped) MariaDB add-on.",
-  pingvin: "Self-hosted WeTransfer-style file sharing, exposed to the internet via Cloudflare Tunnel.",
+// An integration domain and the port of the service it talks to, so an
+// integration can be joined to whichever add-on actually serves it - the
+// generic replacement for a hand-written "mqtt entities belong to these two
+// add-ons" table.
+const DOMAIN_SERVICE_PORTS = {
+  mqtt: 1883,
+  mariadb: 3306,
+  mysql: 3306,
+  postgresql: 5432,
+  recorder: 3306,
 };
 
-// Checked each of these against live state (not just registry presence -
-// an entity can be registered but have no current state, e.g. if it's
-// disabled). On this instance the System Monitor integration only has
-// disk/config, memory, and processor resources actually enabled - load
-// average and last-boot sensors exist in the registry but are
-// disabled_by:"integration" with no live state, so they're left out here
-// rather than shown as a permanent "unavailable". Disk usage's *live*
-// entity_id also turned out to be unprefixed (`sensor.disk_use_percent_
-// config`, not `sensor.system_monitor_disk_use_percent`) - same naming
-// quirk as processor_use below.
+// Hostnames that mean "this machine" inside an ingress or proxy rule, so a
+// route pointing at one is resolved by port rather than by name.
+const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "0.0.0.0", "::1", "homeassistant", "hassio", "supervisor", "host.docker.internal"]);
+
+// Supervisor exposes an add-on to other containers as its slug with
+// underscores swapped for hyphens; Docker names the container `addon_<slug>`.
+// Both spellings turn up in options and in ingress rules, so both are matched.
+function addonIdentifiers(slug) {
+  const dashed = String(slug).replace(/_/g, "-");
+  return [slug, dashed, `addon_${slug}`, `addon_${dashed}`];
+}
+
+// Looks like a hostname someone would put in DNS: at least two labels, a
+// non-numeric TLD. Deliberately strict - an option value of "mqtt" or a
+// version string must not be mistaken for an external route.
+// An icon chosen from what the add-on does, not what it's called.
+const ROLE_ICONS = [
+  [/DNS|DHCP|mDNS/, "shield-check"],
+  [/VPN|Tailscale|WireGuard|OpenVPN/, "vpn"],
+  [/SMB|NFS/, "folder-network"],
+  [/MQTT/, "access-point-network"],
+  [/SQL|Redis|Postgre/, "harddisk"],
+  [/SSH/, "robot"],
+];
+const TIER_ICONS = { network: "access-point-network", remote: "vpn", services: "cloud-outline" };
+function iconForAddon(addon, roles, tier) {
+  for (const role of roles) {
+    const hit = ROLE_ICONS.find(([pattern]) => pattern.test(role.role));
+    if (hit) return hit[1];
+  }
+  // Nothing recognisable published: say so with a neutral icon for the tier
+  // rather than implying knowledge the card doesn't have.
+  return TIER_ICONS[tier] || "cloud-outline";
+}
+
+// Ingress rules as an add-on writes them into its own options. Two shapes
+// cover the common tunnel add-ons: a single hostname for Home Assistant
+// itself, and a list of {hostname, service} pairs for everything else.
+function collectRoutes(options) {
+  const out = [];
+  if (!options || typeof options !== "object") return out;
+  for (const [key, value] of Object.entries(options)) {
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        if (item && typeof item === "object" && looksLikeHostname(item.hostname) && item.service) {
+          out.push({ hostname: item.hostname, service: item.service, source: `options.${key}` });
+        }
+      }
+    } else if (typeof value === "string" && /host/i.test(key) && looksLikeHostname(value)) {
+      // A bare hostname option with nothing to point at is the add-on
+      // publishing Home Assistant itself, which is port 8123 by definition.
+      out.push({ hostname: value, service: "http://homeassistant:8123", source: `options.${key}` });
+    }
+  }
+  return out;
+}
+
+// Routes read out of a running add-on's log. Needed because a tunnel can be
+// managed remotely - cloudflared says so itself ("All app configuration
+// options except tunnel_token will be ignored") and then logs the ingress
+// rules it was handed, as an escaped JSON blob, each time the configuration
+// version changes. The last one logged is the one in force.
+function routesFromLog(text) {
+  if (typeof text !== "string") return [];
+  let latest = null;
+  for (const match of text.matchAll(/config="((?:[^"\\]|\\.)*)"/g)) {
+    try {
+      // The blob is JSON that has been escaped *into* a quoted log field, so
+      // it needs unescaping before it can be parsed.
+      const parsed = JSON.parse(JSON.parse(`"${match[1]}"`));
+      if (Array.isArray(parsed?.ingress)) latest = parsed.ingress;
+    } catch (_) {
+      // A truncated line at the head of the log tail - skip it, a later
+      // config= line is the one that matters anyway.
+    }
+  }
+  const out = (latest || [])
+    // The catch-all rule has a service but no hostname, and isn't a route.
+    .filter((rule) => looksLikeHostname(rule?.hostname) && rule?.service)
+    .map((rule) => ({ hostname: rule.hostname, service: rule.service, source: "log" }));
+
+  // Older cloudflared and several proxies log one rule per line instead.
+  for (const match of text.matchAll(/hostname=(\S+)\s+service=(\S+)/g)) {
+    if (looksLikeHostname(match[1]) && !out.some((r) => r.hostname === match[1])) {
+      out.push({ hostname: match[1], service: match[2], source: "log" });
+    }
+  }
+  return out;
+}
+
+// Whose logs are worth reading for routes? An add-on holding a tunnel or
+// proxy credential, since that's exactly the case where the rules live
+// somewhere else and its options can't tell us anything. Keyed on the option
+// names it declares rather than on the add-on's name.
+function looksLikeIngressProvider(options, prefix = "") {
+  if (!options || typeof options !== "object") return false;
+  return Object.entries(options).some(([key, value]) => {
+    if (/tunnel|ingress|proxy|zone|cloudflare/i.test(key)) return true;
+    return value && typeof value === "object" && !Array.isArray(value) && looksLikeIngressProvider(value, key);
+  });
+}
+
+function looksLikeHostname(value) {
+  return typeof value === "string" && /^(?!-)[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}$/i.test(value.trim());
+}
+
 const HOST_STATS = [
   { key: "cpu", label: "CPU", entity: "sensor.processor_use", suffix: "%" },
   { key: "ram", label: "RAM", entity: "sensor.system_monitor_memory_use_percent", suffix: "%" },
   { key: "disk", label: "Disk (/config)", entity: "sensor.disk_use_percent_config", suffix: "%" },
 ];
 
-// Entity registry `platform` -> curated hub node id(s). Deliberately small
-// and explicit, and now only an *override*: it exists for platforms whose
-// real owner on this map is a hand-placed node rather than their own
-// integration tile (an `mqtt` entity is really served by the Zigbee2MQTT and
-// Mosquitto add-ons, not by the "MQTT" config entry). Anything not listed
-// here resolves generically, through the entity's config entry, to that
-// entry's node in the auto-generated Integrations grid - so no entry ever
-// needs adding here just to stop the finder saying "not modeled".
-const PLATFORM_TO_NODES = {
-  mqtt: ["zigbee2mqtt", "mosquitto"],
-  zha: ["zha"],
-  huawei_lte: ["huawei"],
-  asusrouter: ["asusrouter"],
-  systemmonitor: ["host"],
-  hassio: ["host"],
-};
 
 const COLORS = {
   started: "var(--success-color, #43a047)",
@@ -360,7 +398,7 @@ function formatNetwork(network) {
   return parts.length ? parts.join(", ") : null;
 }
 
-// Grid layout for every add-on NOT already pinned in HUB_LAYOUT above -
+// Grid layout for anything not placed in a tier above -
 // this is what keeps the map from ever "missing" something again as
 // add-ons come and go, without hand-placing coordinates for each one.
 const OTHER_GRID = { cols: 8, spacingX: 140, spacingY: 108, r: 30, marginX: 90, topPad: 55, bottomPad: 40 };
@@ -379,9 +417,16 @@ const GRID_START_Y = 1180; // first auto-grid sits below the curated layout
 // reported as one - see _renderErrors.
 const SUPERVISOR_KEYS = new Set(["addons", "host", "core", "os", "supervisor", "network", "backups", "hardware"]);
 
+// Auto-layout geometry for the tiers below the hardware row.
+const LAYOUT_ROW_H = 150;
+const LAYOUT_TIER_GAP = 34;
+const LAYOUT_MARGIN_X = 110;
+const LAYOUT_MAX_PER_ROW = 6;
+
 const HW_PER_ROW = 7;
 const HW_ROW_H = 130;
 const HW_MARGIN_X = 90;
+const HW_HOST_COL = 3; // the host keeps the middle of the first row
 const HW_COL_W = (1220 - 2 * HW_MARGIN_X) / (HW_PER_ROW - 1);
 // First-row devices fill outward from the host rather than left-to-right, so
 // a single dongle lands next to the host instead of at the far edge.
@@ -750,7 +795,7 @@ class SystemMapCard extends HTMLElement {
       (this._config.discover_hardware && !this._hardware && !this._loadErrors.hardware);
     if (this._loaded && missing) return void this._refreshData();
 
-    this._deriveHardware();
+    this._derive();
     this._buildProblemIndex();
     this._buildCounts();
     try {
@@ -1299,7 +1344,7 @@ class SystemMapCard extends HTMLElement {
   }
 
   // Where does a registry entry live on this map? Three routes, in order:
-  //   1. PLATFORM_TO_NODES - a curated node that is the entity's real owner
+  //   1. DOMAIN_SERVICE_PORTS - the add-on actually running that protocol
   //      (mqtt -> the Zigbee2MQTT/Mosquitto add-ons, not the MQTT tile).
   //   2. A curated `kind:"integration"` node for the entity's own domain.
   //   3. The entity's own config entry, which is always drawn in the
@@ -1308,12 +1353,20 @@ class SystemMapCard extends HTMLElement {
   // entity backed by a config entry - previously anything outside the
   // hand-written table (a camera served by MJPEG, say) fell off the end here.
   _mapTargetForRegistryEntry(reg) {
-    const curated = PLATFORM_TO_NODES[reg.platform] || [];
-    if (curated.length) {
-      return {
-        keys: curated.map((id) => `node:${id}`),
-        names: curated.map((id) => this._node(id)?.label || id),
-      };
+    // An entity from a protocol integration is really served by whichever
+    // add-on runs that protocol - an mqtt entity by the broker, not by the
+    // "MQTT" tile. Derived from the port the add-on publishes, so it needs no
+    // table of which add-ons those are on this particular instance.
+    const port = DOMAIN_SERVICE_PORTS[reg.platform];
+    if (port) {
+      const providers = this._derived.nodes.filter((n) => {
+        if (n.kind !== "addon") return false;
+        const info = this._addonInfoCache.get(n.slug);
+        return Object.keys(info?.network || {}).some((p) => parseInt(p, 10) === port);
+      });
+      if (providers.length) {
+        return { keys: providers.map((n) => `node:${n.id}`), names: providers.map((n) => n.label) };
+      }
     }
 
     // `config_entry_id` is the authoritative link (it survives a platform
@@ -1324,8 +1377,9 @@ class SystemMapCard extends HTMLElement {
       this._findEntry(reg.platform) ||
       null;
 
-    const curatedNode = this._layout().find((n) => n.kind === "integration" && n.domain === (entry?.domain || reg.platform));
-    if (curatedNode) return { keys: [`node:${curatedNode.id}`], names: [curatedNode.label] };
+    // A derived integration node (a router, say) if this domain got one.
+    const placed = this._derived.nodes.find((n) => n.kind === "integration" && n.domain === (entry?.domain || reg.platform));
+    if (placed) return { keys: [`node:${placed.id}`], names: [placed.label] };
 
     if (entry) {
       const name = entry.title ? `${entry.domain}: ${entry.title}` : entry.domain;
@@ -1483,7 +1537,7 @@ class SystemMapCard extends HTMLElement {
     this._addonStatsCache.clear();
     this._lastRefreshed = new Date();
 
-    this._deriveHardware();
+    this._derive();
     this._buildProblemIndex();
     this._buildCounts();
 
@@ -1505,6 +1559,7 @@ class SystemMapCard extends HTMLElement {
     // are slow, neither changes the shape of the map, and the derived
     // hardware edges need one /addons/<slug>/info per add-on.
     if (this._config.discover_hardware) this._loadAddonOptions();
+    else this._loadRouteLogs().then(() => this._derive()).then(() => this._renderGraph());
     if (this._config.show_sparklines) this._loadHistory();
     this._scheduleRefresh();
   }
@@ -1530,8 +1585,29 @@ class SystemMapCard extends HTMLElement {
       await this._fetchAddonInfo(addon.slug);
     }
     if (!this.isConnected) return;
-    this._deriveHardware();
+    await this._loadRouteLogs();
+    this._derive();
+    this._buildProblemIndex();
+    this._buildCounts();
     if (!this._detailKey) this._renderGraph();
+  }
+
+  // Reads the log of any add-on holding a tunnel or proxy credential. That is
+  // the only way to see a remotely-managed tunnel's routes: cloudflared says
+  // as much itself ("All app configuration options except tunnel_token will
+  // be ignored") and then logs the ingress rules it was handed. Restricted to
+  // add-ons whose *options* show they could be one, so this is one or two log
+  // reads rather than one per add-on.
+  async _loadRouteLogs() {
+    const found = [];
+    for (const addon of this._addons) {
+      if (!this.isConnected) return;
+      const info = this._addonInfoCache.get(addon.slug);
+      if (!info || info._error || !looksLikeIngressProvider(info.options)) continue;
+      const log = await this._fetchAddonLog(addon.slug, 400);
+      for (const route of routesFromLog(log)) found.push({ ...route, viaSlug: addon.slug });
+    }
+    this._logRoutes = found;
   }
 
   // One hour of the two headline stats, downsampled to fit a ~60px sparkline.
@@ -1777,28 +1853,274 @@ class SystemMapCard extends HTMLElement {
   // The effective node list: the curated layout plus whatever hardware was
   // discovered, with the non-hardware tiers pushed down far enough to clear
   // however many hardware rows this instance actually needs. Nothing else in
-  // the card reads HUB_LAYOUT directly, so a discovered device is a
+  // the card reads the raw lists directly, so a discovered device is a
   // first-class node everywhere - edges, highlights, detail, the lot.
   _layout() {
     const shown = new Set(this._config.tiers);
-    const hw = this._derived.nodes;
-    const offset = (hwRowCount(hw.length) - 1) * HW_ROW_H;
-
-    const out = [];
-    for (const n of HUB_LAYOUT) {
-      if (!shown.has(n.tier)) continue;
-      out.push(n.tier === "hardware" ? n : { ...n, y: n.y + offset });
-    }
-    if (shown.has("hardware")) out.push(...hw);
-    return out;
+    return this._derived.nodes.filter((n) => shown.has(n.tier));
   }
 
   _edges() {
-    return [...HUB_EDGES, ...this._derived.edges];
+    const shown = new Set(this._layout().map((n) => n.id));
+    return this._derived.edges.filter(([from, to]) => shown.has(from) && shown.has(to));
   }
 
   _node(id) {
-    return this._layout().find((n) => n.id === id);
+    return this._derived.nodes.find((n) => n.id === id);
+  }
+
+  // --- the derivation -----------------------------------------------------
+  //
+  // Everything on the map above the auto-grids is built here, from the
+  // instance's own data. Nothing is hand-placed and nothing is named in
+  // advance: an add-on's tier comes from the ports it publishes, its edges
+  // from the hostnames in its own options, and its public URL from whichever
+  // add-on is serving it a tunnel. Run in order, because each step reads the
+  // one before it.
+  _derive() {
+    const addons = this._deriveAddonNodes();
+    const hardware = this._deriveHardware(addons);
+    const routes = this._deriveRoutes(addons);
+    // A public URL belongs on whatever the tunnel actually points at.
+    for (const route of routes) {
+      const target = addons.find((n) => n.id === route.targetId);
+      if (target && !target.exposedUrl) {
+        target.exposedUrl = `https://${route.hostname}`;
+        target.badge = "public";
+        target.notes.push(`Reachable at ${route.hostname} through ${route.viaSlug}`);
+      }
+    }
+    const nodes = [this._hostNode(routes), ...hardware.nodes, ...addons, ...this._deriveNetworkIntegrations()];
+    const edges = [...hardware.edges, ...this._deriveServiceEdges(nodes, routes)];
+    this._routes = routes;
+    this._derived = { nodes: this._autoLayout(nodes, edges), edges };
+  }
+
+  _hostNode(routes) {
+    const external = routes.find((r) => r.targetId === "host");
+    return {
+      id: "host",
+      kind: "host",
+      tier: "hardware",
+      label: this._system.host?.hostname || "Home Assistant",
+      icon: "chip",
+      r: 62,
+      exposedUrl: external ? `https://${external.hostname}` : null,
+      notes: [
+        this._system.core?.version ? `Home Assistant Core ${this._system.core.version}` : null,
+        this._system.os?.board ? `on ${this._system.os.board}` : null,
+      ].filter(Boolean),
+    };
+  }
+
+  // One node per add-on, tiered by the ports it publishes. An add-on with no
+  // recognised port is a service, which is the honest default - it's running
+  // and we can't say more than that.
+  _deriveAddonNodes() {
+    return this._addons.map((addon) => {
+      const info = this._addonInfoCache.get(addon.slug);
+      const ports = Object.keys(info?.network || {}).map((p) => parseInt(p, 10));
+      const roles = PORT_ROLES.filter((r) => ports.includes(r.port));
+      const tier = roles.find((r) => r.tier)?.tier || "services";
+      return {
+        id: `addon_${slugify(addon.slug)}`,
+        kind: "addon",
+        slug: addon.slug,
+        tier,
+        label: addon.name || addon.slug,
+        icon: iconForAddon(addon, roles, tier),
+        r: 34,
+        roles: roles.map((r) => r.role),
+        notes: roles.length ? [`Publishes ${roles.map((r) => r.role).join(", ")}`] : [],
+      };
+    });
+  }
+
+  // A router or access point is an integration that reports where devices are
+  // on the network - HA marks those device_tracker entities with
+  // source_type "router". That is the one signal for "network infrastructure"
+  // that doesn't require knowing the integration by name.
+  _deriveNetworkIntegrations() {
+    const byEntry = new Map();
+    for (const reg of this._entityRegistry) {
+      if (!reg.entity_id?.startsWith("device_tracker.") || !reg.config_entry_id) continue;
+      if (this._hass?.states?.[reg.entity_id]?.attributes?.source_type !== "router") continue;
+      byEntry.set(reg.config_entry_id, (byEntry.get(reg.config_entry_id) || 0) + 1);
+    }
+    return [...byEntry.entries()].map(([entryId, tracked]) => {
+      const entry = this._entries.find((e) => e.entry_id === entryId);
+      return {
+        id: `entry_${slugify(entryId)}`,
+        kind: "integration",
+        domain: entry?.domain,
+        entryId,
+        tier: "network",
+        label: entry?.title || entry?.domain || entryId,
+        icon: "router-wireless",
+        r: 34,
+        notes: [`Reports ${tracked} device${tracked === 1 ? "" : "s"} as present on the network`],
+      };
+    });
+  }
+
+  // External hostnames, read from the add-on that publishes them. A tunnel
+  // add-on's options carry its ingress rules - hostname plus the service URL
+  // behind it - which is both more reliable and cheaper than parsing logs.
+  // Anything configured remotely (rules living in the Cloudflare dashboard
+  // rather than locally) only shows up in the log, so that's the fallback.
+  _deriveRoutes(addonNodes) {
+    const routes = [];
+    for (const node of addonNodes) {
+      const info = this._addonInfoCache.get(node.slug);
+      if (!info || info._error) continue;
+      for (const raw of collectRoutes(info.options)) {
+        const target = this._resolveService(raw.service, addonNodes);
+        routes.push({ ...raw, viaId: node.id, viaSlug: node.slug, targetId: target?.id ?? null });
+      }
+    }
+    for (const raw of this._logRoutes || []) {
+      const target = this._resolveService(raw.service, addonNodes);
+      const via = addonNodes.find((n) => n.slug === raw.viaSlug);
+      routes.push({ ...raw, viaId: via?.id ?? null, targetId: target?.id ?? null });
+    }
+    // An add-on that publishes hostnames for other things is a way in, not a
+    // service - that's what makes it "remote access" without knowing its name.
+    for (const node of addonNodes) {
+      if (routes.some((r) => r.viaId === node.id)) node.tier = "remote";
+    }
+    return routes;
+  }
+
+  // "http://addon_x_pingvin:3000" -> that add-on's node. A rule pointing at
+  // the machine itself is resolved by port instead, since that's the only
+  // thing distinguishing one local service from another.
+  _resolveService(service, addonNodes) {
+    if (!service) return null;
+    const match = String(service).match(/^(?:[a-z0-9+.-]+:\/\/)?([^/:]+)(?::(\d+))?/i);
+    if (!match) return null;
+    const [, host, portText] = match;
+    const port = portText ? parseInt(portText, 10) : null;
+
+    const byName = addonNodes.find((n) => addonIdentifiers(n.slug).some((id) => id.toLowerCase() === host.toLowerCase()));
+    if (byName) return byName;
+
+    if (!this._localHosts().has(host.toLowerCase()) || !port) return null;
+    const byPort = addonNodes.find((n) => {
+      const info = this._addonInfoCache.get(n.slug);
+      return Object.values(info?.network || {}).some((hostPort) => hostPort === port);
+    });
+    return byPort || { id: "host" }; // 8123 and anything else local is the host
+  }
+
+  // Positions, computed rather than authored. Tiers stack down the page in
+  // the order they're drawn in; within a tier, a node is placed near the
+  // average position of whatever it connects to in the tier above, which is
+  // the standard barycentre trick for keeping edges from crossing. Ties keep
+  // the input order, so the map doesn't reshuffle between refreshes.
+  _autoLayout(nodes, edges) {
+    const byId = new Map(nodes.map((n) => [n.id, n]));
+    const neighbours = new Map();
+    for (const [from, to] of edges) {
+      if (!byId.has(from) || !byId.has(to)) continue;
+      (neighbours.get(from) || neighbours.set(from, []).get(from)).push(to);
+      (neighbours.get(to) || neighbours.set(to, []).get(to)).push(from);
+    }
+
+    const hardware = nodes.filter((n) => n.tier === "hardware" && n.kind !== "host");
+    const host = nodes.find((n) => n.kind === "host");
+    if (host) {
+      host.x = hwColX(HW_HOST_COL);
+      host.y = 150;
+    }
+    // _deriveHardware already gave the discovered devices their slots.
+    let y = 150 + hwRowCount(hardware.length) * HW_ROW_H;
+
+    const placedX = new Map(host ? [[host.id, host.x]] : []);
+    for (const n of hardware) placedX.set(n.id, n.x);
+
+    for (const tier of TIER_ORDER) {
+      if (tier === "hardware") continue;
+      const inTier = nodes.filter((n) => n.tier === tier);
+      if (!inTier.length) continue;
+
+      const barycentre = (n) => {
+        const xs = (neighbours.get(n.id) || []).map((id) => placedX.get(id)).filter((x) => x !== undefined);
+        return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : Number.POSITIVE_INFINITY;
+      };
+      const ordered = inTier
+        .map((n, i) => ({ n, i, b: barycentre(n) }))
+        .sort((a, b) => a.b - b.b || a.i - b.i)
+        .map((entry) => entry.n);
+
+      const perRow = Math.min(LAYOUT_MAX_PER_ROW, Math.max(3, Math.ceil(Math.sqrt(ordered.length * 1.7))));
+      const rows = Math.ceil(ordered.length / perRow);
+      y += LAYOUT_TIER_GAP;
+      ordered.forEach((n, i) => {
+        const row = Math.floor(i / perRow);
+        const inRow = Math.min(perRow, ordered.length - row * perRow);
+        const col = i % perRow;
+        const span = 1220 - 2 * LAYOUT_MARGIN_X;
+        n.x = inRow === 1 ? 610 : LAYOUT_MARGIN_X + col * (span / (inRow - 1));
+        n.y = y + row * LAYOUT_ROW_H;
+        placedX.set(n.id, n.x);
+      });
+      y += (rows - 1) * LAYOUT_ROW_H + LAYOUT_ROW_H;
+    }
+
+    this._layoutBottom = y;
+    return nodes;
+  }
+
+  // "localhost" and friends, plus this machine's own LAN addresses - a
+  // remotely-managed tunnel points its rules at the host's IP rather than at
+  // a container name, so without these every one of its routes resolves to
+  // nothing.
+  _localHosts() {
+    const hosts = new Set(LOCAL_HOSTS);
+    for (const iface of this._system.network?.interfaces || []) {
+      for (const cidr of iface.ipv4?.address || []) hosts.add(String(cidr).split("/")[0].toLowerCase());
+      for (const cidr of iface.ipv6?.address || []) hosts.add(String(cidr).split("/")[0].toLowerCase());
+    }
+    if (this._system.host?.hostname) hosts.add(String(this._system.host.hostname).toLowerCase());
+    return hosts;
+  }
+
+  // Add-ons name each other in their own options - an MQTT client points at
+  // `mqtt://core-mosquitto:1883`, a proxy at `http://addon_x:80`. Matching
+  // every add-on's identifiers against every other add-on's options turns
+  // that into edges, with the option that matched as the label.
+  _deriveServiceEdges(nodes, routes) {
+    const edges = [];
+    const addonNodes = nodes.filter((n) => n.kind === "addon");
+
+    for (const consumer of addonNodes) {
+      const info = this._addonInfoCache.get(consumer.slug);
+      if (!info || info._error) continue;
+      for (const provider of addonNodes) {
+        if (provider.id === consumer.id) continue;
+        const hit = findDeviceInOptions(info.options, { paths: addonIdentifiers(provider.slug), labels: [] });
+        if (hit) edges.push([consumer.id, provider.id, { label: hit.option, dashed: true }]);
+      }
+    }
+
+    // A tunnel's ingress rule is an edge from the way in to what it reaches.
+    for (const route of routes) {
+      if (!route.viaId || !route.targetId || route.viaId === route.targetId) continue;
+      edges.push([route.viaId, route.targetId, { label: route.hostname, dashed: true }]);
+    }
+
+    // An integration and the add-on serving its protocol.
+    for (const node of nodes.filter((n) => n.kind === "integration")) {
+      const port = DOMAIN_SERVICE_PORTS[node.domain];
+      if (!port) continue;
+      for (const provider of addonNodes) {
+        const info = this._addonInfoCache.get(provider.slug);
+        if (Object.keys(info?.network || {}).some((p) => parseInt(p, 10) === port)) {
+          edges.push([node.id, provider.id, { label: node.domain }]);
+        }
+      }
+    }
+    return edges;
   }
 
   // Builds the hardware tier from Supervisor's /hardware/info: every drive,
@@ -1808,11 +2130,8 @@ class SystemMapCard extends HTMLElement {
   // looking for those exact paths in each add-on's own options, so "which
   // add-on owns this dongle" is read off the configuration rather than
   // asserted by hand.
-  _deriveHardware() {
-    if (!this._config.discover_hardware || !this._hardware) {
-      this._derived = { nodes: [], edges: [] };
-      return;
-    }
+  _deriveHardware(addonNodes = []) {
+    if (!this._config.discover_hardware || !this._hardware) return { nodes: [], edges: [] };
     const devices = Array.isArray(this._hardware.devices) ? this._hardware.devices : [];
     const drives = Array.isArray(this._hardware.drives) ? this._hardware.drives : [];
 
@@ -1877,7 +2196,7 @@ class SystemMapCard extends HTMLElement {
     // SMB server (by its own published ports, not its name), the others are
     // drawn downstream of *it* rather than hanging off the drive - which is
     // what the dependency actually is, and what breaks if that add-on stops.
-    const nodeFor = (slug) => HUB_LAYOUT.find((h) => h.kind === "addon" && h.slug === slug);
+    const nodeFor = (slug) => addonNodes.find((h) => h.slug === slug);
     for (const n of nodes) {
       const forNode = claims.filter((c) => c.node === n);
       const servers = forNode.filter((c) => servesSmb(c.info));
@@ -1900,7 +2219,7 @@ class SystemMapCard extends HTMLElement {
       }
     }
 
-    this._derived = { nodes, edges };
+    return { nodes, edges };
   }
 
   // Resolves an entity registry entry to node key(s) once per
@@ -2170,14 +2489,14 @@ class SystemMapCard extends HTMLElement {
     // from the map. Leftover add-ons first, then *every* config entry, so
     // each integration has a real node the entity finder can point at
     // instead of reporting it as unmodeled.
-    const pinnedSlugs = new Set(layout.filter((n) => n.kind === "addon").map((n) => n.slug));
+    const pinnedSlugs = new Set(this._derived.nodes.filter((n) => n.kind === "addon").map((n) => n.slug));
     let otherAddons = this._addons.filter((a) => !pinnedSlugs.has(a.slug));
     if (this._hideInactive) otherAddons = otherAddons.filter((a) => !isInactiveStatus(addonStatus(a)));
     const addonItems = [...otherAddons]
       .sort((a, b) => (a.name || "").localeCompare(b.name || ""))
       .map((a) => ({ kind: "addon", key: a.slug, label: a.name, color: colorFor(addonStatus(a)) }));
 
-    const pinnedDomains = new Set(layout.filter((n) => n.kind === "integration").map((n) => n.domain));
+    const pinnedDomains = new Set(this._derived.nodes.filter((n) => n.kind === "integration").map((n) => n.domain));
     let otherEntries = this._entries.filter((e) => !pinnedDomains.has(e.domain));
     if (this._hideInactive) otherEntries = otherEntries.filter((e) => !isInactiveStatus(entryStatus(e)));
     otherEntries = [...otherEntries].sort((a, b) => (a.domain || "").localeCompare(b.domain || ""));
@@ -2193,7 +2512,7 @@ class SystemMapCard extends HTMLElement {
       color: colorFor(entryStatus(e)),
     }));
 
-    const gridTop = GRID_START_Y + (hwRowCount(this._derived.nodes.length) - 1) * HW_ROW_H;
+    const gridTop = (this._layoutBottom || GRID_START_Y) + 40;
     const grids = [];
     let cursor = gridTop;
     const addGrid = (items, geom, color, label, dataAttr) => {
@@ -2463,7 +2782,7 @@ class SystemMapCard extends HTMLElement {
   // Never cached: a log tail that doesn't change when you reopen it is
   // worse than no log at all. Trimmed to the last lines - the endpoint can
   // return a lot, and this is a glance, not a log viewer.
-  async _fetchAddonLog(slug) {
+  async _fetchAddonLog(slug, lines = 25) {
     try {
       const res = await this._hass.connection.sendMessagePromise({
         type: "supervisor/api",
@@ -2472,7 +2791,7 @@ class SystemMapCard extends HTMLElement {
       });
       const text = typeof res === "string" ? res : res?.data ?? "";
       if (typeof text !== "string" || !text.trim()) return null;
-      return text.trim().split("\n").slice(-25).join("\n");
+      return text.trim().split("\n").slice(-lines).join("\n");
     } catch (e) {
       return `Couldn't read the log: ${describeError(e)}`;
     }
@@ -2492,7 +2811,7 @@ class SystemMapCard extends HTMLElement {
       ["Description", info.description],
     ];
     if (n?.exposedUrl) {
-      rows.push(["Exposed via Cloudflare", `<a href="${escapeHtml(n.exposedUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(n.exposedUrl)}</a>`, true]);
+      rows.push(["Public URL", `<a href="${escapeHtml(n.exposedUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(n.exposedUrl)}</a>`, true]);
     }
     return rows;
   }
@@ -2513,7 +2832,7 @@ class SystemMapCard extends HTMLElement {
       const n = this._node(key);
       if (!n) return this._closeDetail();
       title = n.label;
-      role = ROLES[n.id] || "";
+      role = (n.notes || []).join(". ");
       if (n.kind === "host") {
         // Skip rather than show "unavailable" for any stat whose entity
         // has no live state right now (e.g. disabled by the integration) -
@@ -2526,7 +2845,7 @@ class SystemMapCard extends HTMLElement {
           })
           .filter(Boolean);
         if (n.exposedUrl) {
-          rows.push(["Exposed via Cloudflare", `<a href="${escapeHtml(n.exposedUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(n.exposedUrl)}</a>`, true]);
+          rows.push(["Public URL", `<a href="${escapeHtml(n.exposedUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(n.exposedUrl)}</a>`, true]);
         }
         rows.push(["Hostname", this._system.host?.hostname]);
         rows.push(["Board", this._system.os?.board]);
@@ -2568,8 +2887,8 @@ class SystemMapCard extends HTMLElement {
     } else if (kind === "addon") {
       const addon = this._findAddon(key);
       title = addon?.name || key;
-      const hub = this._layout().find((n) => n.kind === "addon" && n.slug === key);
-      if (hub) role = ROLES[hub.id] || "";
+      const hub = this._derived.nodes.find((n) => n.kind === "addon" && n.slug === key);
+      if (hub) role = (hub.notes || []).join(". ");
       const info = await this._fetchAddonInfo(key);
       rows = this._addonInfoRows(info, hub);
       sections += await this._addonExtras(key);
@@ -2602,8 +2921,8 @@ class SystemMapCard extends HTMLElement {
       const entry = this._entries.find((e) => e.entry_id === key);
       if (!entry) return this._closeDetail();
       title = entry.title || entry.domain;
-      const hub = this._layout().find((n) => n.kind === "integration" && n.domain === entry.domain);
-      if (hub) role = ROLES[hub.id] || "";
+      const hub = this._derived.nodes.find((n) => n.kind === "integration" && n.domain === entry.domain);
+      if (hub) role = (hub.notes || []).join(". ");
       rows = [
         ["Domain", entry.domain],
         ["State", entry.state],
