@@ -1,19 +1,45 @@
-// Lovelace custom card: full topology map of this Home Assistant server -
-// physical hardware at top, which add-on owns each piece of hardware and
-// why, LAN-wide network infrastructure, remote-access entry/exit points in
-// their own (colour-coded) section, confirmed externally-exposed services
-// with both their internal port and public URL, every remaining add-on in
-// an auto-generated grid (so nothing is ever missing), and an entity finder
-// that highlights which node(s) serve a given entity - including tracing
-// through "helper" entities like switch_as_x back to their real source.
-// See the "HA server architecture" conversation this was built from for the
-// full reasoning; short version below.
+// Lovelace custom card: a live topology *and health* map of this Home
+// Assistant server - discovered physical hardware at the top with the add-on
+// that owns each piece derived from that add-on's own options, LAN-wide
+// network infrastructure, remote-access entry/exit points in their own
+// (colour-coded) section, confirmed externally-exposed services with both
+// their internal port and public URL, every remaining add-on and every
+// config entry in auto-generated grids (so nothing is ever missing), a
+// status bar of the numbers you'd check first, and an entity finder that
+// highlights which node(s) serve a given entity - including tracing through
+// "helper" entities like switch_as_x back to their real source.
+//
+// The thing that makes it a monitor rather than a diagram is the joins: an
+// add-on can be "started" and an integration "loaded" while every entity
+// they serve is dead, so entity states, the repairs registry and System
+// Health are all resolved back onto the node that owns them and drawn as a
+// ring and a count on that node.
+//
+// Everything is configurable from the visual editor - see DEFAULTS and
+// EDITOR_SCHEMA, which are deliberately written against the same key names
+// so an option can't be settable in one and ignored by the other.
 //
 // Data sources (all live, no backend add-on required):
 //   - WS `supervisor/api` {endpoint:"/addons", method:"get"} -> add-on list
 //   - WS `supervisor/api` {endpoint:"/addons/<slug>/info", ...} -> full
-//     per-add-on detail (state, version, network/ports), fetched lazily
-//     only when a node/chip is clicked
+//     per-add-on detail (state, version, network/ports, and the `options`
+//     the hardware-ownership edges are derived from)
+//   - WS `supervisor/api` /addons/<slug>/stats + /logs -> live CPU, memory,
+//     network and disk per add-on, and a log tail; both fetched only when a
+//     node is clicked, since /stats is per-container and polling it for
+//     thirty add-ons would be its own performance problem
+//   - WS `supervisor/api` /hardware/info -> drives and serial devices, which
+//     is where the hardware tier comes from
+//   - WS `supervisor/api` /host/info, /os/info, /core/info, /supervisor/info,
+//     /network/info, /backups -> the status bar
+//   - WS `repairs/list_issues` -> open repair issues, resolved onto nodes
+//   - WS `system_health/info` -> per-integration health. This one *streams*
+//     (it answers with the domains it knows and then pushes each one's data
+//     as its health callback resolves), so it's subscribed to for a moment
+//     rather than awaited as a request
+//   - WS `history/history_during_period` -> the host-stat sparklines
+//   - WS `config/area_registry/list` -> area names, for the counts and the
+//     optional group-by-area layout
 //   - WS `config_entries/get` -> every integration's domain, title, state,
 //     disabled_by, source, and (for helper integrations like switch_as_x)
 //     its `options.entity_id` - the entity it wraps
@@ -28,11 +54,25 @@
 //     nothing else on the card actually needs.
 //   - `hass.states` for System Monitor sensors and the entity-search list
 //
-// What this card deliberately does NOT try to compute live: the *edges*,
-// *role* text, and *entity->node* mapping (HUB_EDGES / ROLES /
-// PLATFORM_TO_NODES below) - all hand-written from reading add-on options,
-// automation YAML, live add-on logs, external DNS/HTTPS probes, and the
-// household's own account of their physical wiring. Two flagged
+// Every one of those beyond the first three is enrichment: each is fetched
+// through _fetch(), which records a failure against its own key and lets the
+// rest of the card render regardless. Several are Supervisor-only, so an
+// instance without the Supervisor degrades to the curated map rather than
+// breaking.
+//
+// The hardware tier and its ownership edges ARE computed live: devices come
+// from Supervisor's /hardware/info, and "which add-on owns this dongle" is
+// read off that add-on's own options (findPathInOptions looks for the
+// device's by-id path or mount point anywhere in the options tree, and
+// labels the edge with the option key that matched - `owns (serial.port)`).
+// So moving a dongle redraws the map instead of making it wrong. A device
+// no add-on claims says so, rather than being quietly left unconnected.
+//
+// What this card still does NOT compute live: the *service/network/remote*
+// edges, the *role* text, and the *entity->node* overrides (HUB_EDGES /
+// ROLES / PLATFORM_TO_NODES below) - hand-written from reading add-on
+// options, automation YAML, live add-on logs, external DNS/HTTPS probes,
+// and the household's own account of their physical wiring. Two flagged
 // uncertainties baked into the text rather than silently asserted:
 //   - AdGuard: HA's own host network config and Supervisor's DNS fallback
 //     are both explicitly set to 1.1.1.1/8.8.8.8, not AdGuard's address -
@@ -120,9 +160,14 @@ const ICON_PATHS = {
 // `icon` is a key into ICON_PATHS above.
 const HUB_LAYOUT = [
   // hardware
-  { id: "usb_dongle", label: "USB: Sonoff Dongle", x: 280, y: 150, r: 36, kind: "hardware", tier: "hardware", icon: "usb-port" },
-  { id: "host", label: "HA Server (N100)", x: 620, y: 150, r: 62, kind: "host", tier: "hardware", icon: "chip", exposedUrl: "https://ha.nicholastoo.com" },
-  { id: "usb_hdd", label: "USB: External HDD", x: 960, y: 150, r: 36, kind: "hardware", tier: "hardware", icon: "harddisk" },
+  // The hardware tier is discovered at runtime from Supervisor's
+  // /hardware/info (see _deriveHardware) - only the host itself is pinned,
+  // since it's the one node everything else hangs off. x/y here are the
+  // host's slot in the hardware row; the discovered devices lay themselves
+  // out around it.
+  // x is column 3 of the hardware row (see hwColX) so the host sits centred
+  // among whatever devices get discovered around it.
+  { id: "host", label: "HA Server", x: 610, y: 150, r: 62, kind: "host", tier: "hardware", icon: "chip", exposedUrl: "https://ha.nicholastoo.com" },
 
   // services using that hardware
   { id: "zigbee2mqtt", label: "Zigbee2MQTT", x: 280, y: 330, r: 46, kind: "addon", slug: "45df7312_zigbee2mqtt", deviceCountDomain: "mqtt", tier: "services", icon: "zigbee" },
@@ -170,17 +215,10 @@ const OTHER_GRID_COLOR = "#78909c"; // neutral - not a real "tier", just leftove
 // [from, to, {label?, dashed?}] - drawn under the node circles so trimming
 // the line to the circle edge isn't needed, the circle just covers the end.
 const HUB_EDGES = [
-  ["host", "usb_dongle", { label: "USB" }],
-  ["host", "usb_hdd", { label: "USB" }],
-  ["usb_dongle", "zigbee2mqtt", { label: "owns" }],
-  ["usb_hdd", "samba", { label: "owns" }],
   ["samba", "host", { dashed: true, label: "NAS1 (SMB loop)" }],
   ["zigbee2mqtt", "mosquitto", { label: "MQTT" }],
   ["zigbee2mqtt", "zha", { dashed: true, label: "ignored" }],
-  ["usb_hdd", "immich", { dashed: true, label: "external library" }],
   ["immich", "immich_ml", { label: "ML sidecar" }],
-  ["usb_hdd", "kiwix", { dashed: true, label: "reads NAS1" }],
-  ["usb_hdd", "nas1_watcher", { label: "watches link" }],
   ["host", "claude_code", { label: "admin access" }],
   ["asusrouter", "adguard", { label: "DNS" }],
   ["asusrouter", "huawei", { dashed: true, label: "WAN uplink" }],
@@ -195,8 +233,6 @@ const HUB_EDGES = [
 // HUB_EDGES above - including two flagged uncertainties, see file header.
 const ROLES = {
   host: "The physical server itself - an Intel N100 mini-PC running Home Assistant OS. Every add-on and integration on this map runs on it as a Docker container.",
-  usb_dongle: "Physically plugged into the host over USB. A Zigbee radio coordinator, owned exclusively by Zigbee2MQTT below - not by ZHA (see that node).",
-  usb_hdd: "Physically plugged into the host over USB (LITEON, ~1.9TB, known flaky link). Owned exclusively by Samba NAS-β below, which shares it out on the LAN.",
   zigbee2mqtt: "Owns the Sonoff USB dongle and runs the Zigbee coordinator network, bridging Zigbee end devices (lights, sensors, blinds, plugs, etc.) to Home Assistant over MQTT.",
   claude_code: "Runs Claude (this AI assistant) inside Home Assistant. Has full read/write access to the /homeassistant config directory and the same Supervisor admin API this card itself uses - effectively admin-level access to everything on this map.",
   samba: "Owns the external USB HDD and shares it on the LAN as an SMB/CIFS share ('NAS1'). Home Assistant itself also mounts that same share back over the network - a loop - for other add-ons to read.",
@@ -323,9 +359,276 @@ const ENTRY_GRID = { cols: 10, spacingX: 112, spacingY: 84, r: 22, marginX: 80, 
 const ENTRY_GRID_COLOR = "#5c6bc0"; // indigo - distinct from the four tiers and the add-on grid
 const GRID_START_Y = 1180; // first auto-grid sits below the curated layout
 
+// Hardware row geometry. The host occupies slot 0; discovered devices fill
+// the rest of the row and wrap, and everything below the hardware tier is
+// pushed down by however many extra rows that takes (see _layout).
+const HW_PER_ROW = 7;
+const HW_ROW_H = 130;
+const HW_MARGIN_X = 90;
+const HW_COL_W = (1220 - 2 * HW_MARGIN_X) / (HW_PER_ROW - 1);
+// First-row devices fill outward from the host rather than left-to-right, so
+// a single dongle lands next to the host instead of at the far edge.
+const HW_ROW0_COLS = [2, 4, 1, 5, 0, 6];
+const hwColX = (col) => HW_MARGIN_X + col * HW_COL_W;
+// Slot 0..5 sit beside the host on row 0; everything after wraps into full
+// rows below it.
+const hwSlot = (i) =>
+  i < HW_ROW0_COLS.length
+    ? { row: 0, col: HW_ROW0_COLS[i] }
+    : { row: 1 + Math.floor((i - HW_ROW0_COLS.length) / HW_PER_ROW), col: (i - HW_ROW0_COLS.length) % HW_PER_ROW };
+const hwRowCount = (n) => (n <= HW_ROW0_COLS.length ? 1 : 1 + Math.ceil((n - HW_ROW0_COLS.length) / HW_PER_ROW));
+
+// Every user-facing option, with its default. This object is the single
+// source of truth for the card's config: setConfig() spreads it, and the
+// visual editor's schema below is written against the same key names, so a
+// new option can't end up settable in one and ignored by the other.
+const DEFAULTS = {
+  title: "System Map",
+  graph_height: 480,
+  refresh_interval: 60, // seconds; 0 disables background refresh
+  hide_inactive: false,
+  // Sections
+  show_status_bar: true,
+  show_host_stats: true,
+  show_legend: true,
+  show_entity_finder: true,
+  show_addon_grid: true,
+  show_integration_grid: true,
+  show_integration_list: true,
+  // Data joins
+  highlight_problems: true, // unavailable entities / repair issues / error states
+  show_counts: true, // devices - entities - areas per node
+  show_addon_stats: true, // live CPU/RAM in the detail panel
+  show_addon_logs: false, // log tail in the detail panel - off by default, logs can carry secrets
+  show_sparklines: true, // host CPU/RAM history strip
+  discover_hardware: true, // build the hardware tier from Supervisor's hardware/info
+  group_by_area: false,
+  tiers: ["hardware", "services", "network", "remote"],
+  // Overrides for instances that don't run System Monitor under these names
+  cpu_entity: "",
+  ram_entity: "",
+  disk_entity: "",
+  temperature_entity: "",
+};
+
+// ha-form schema for the visual editor. Grouped into expandable sections so
+// the panel opens short: title and the two numbers people actually change
+// first, everything else folded away.
+const EDITOR_SCHEMA = [
+  { name: "title", selector: { text: {} } },
+  {
+    type: "grid",
+    name: "",
+    schema: [
+      { name: "graph_height", selector: { number: { min: 240, max: 1600, step: 20, unit_of_measurement: "px", mode: "box" } } },
+      { name: "refresh_interval", selector: { number: { min: 0, max: 3600, step: 10, unit_of_measurement: "s", mode: "box" } } },
+    ],
+  },
+  {
+    type: "expandable",
+    name: "sections",
+    icon: "mdi:view-dashboard-outline",
+    schema: [
+      {
+        type: "grid",
+        name: "",
+        schema: [
+          { name: "show_status_bar", selector: { boolean: {} } },
+          { name: "show_host_stats", selector: { boolean: {} } },
+          { name: "show_sparklines", selector: { boolean: {} } },
+          { name: "show_legend", selector: { boolean: {} } },
+          { name: "show_entity_finder", selector: { boolean: {} } },
+          { name: "show_addon_grid", selector: { boolean: {} } },
+          { name: "show_integration_grid", selector: { boolean: {} } },
+          { name: "show_integration_list", selector: { boolean: {} } },
+        ],
+      },
+      {
+        name: "tiers",
+        selector: {
+          select: {
+            multiple: true,
+            mode: "list",
+            options: [
+              { value: "hardware", label: "Physical hardware" },
+              { value: "services", label: "Services using that hardware" },
+              { value: "network", label: "Network infrastructure (LAN)" },
+              { value: "remote", label: "Remote access / entry & exit points" },
+            ],
+          },
+        },
+      },
+    ],
+  },
+  {
+    type: "expandable",
+    name: "data",
+    icon: "mdi:database-search-outline",
+    schema: [
+      {
+        type: "grid",
+        name: "",
+        schema: [
+          { name: "highlight_problems", selector: { boolean: {} } },
+          { name: "show_counts", selector: { boolean: {} } },
+          { name: "discover_hardware", selector: { boolean: {} } },
+          { name: "group_by_area", selector: { boolean: {} } },
+          { name: "show_addon_stats", selector: { boolean: {} } },
+          { name: "show_addon_logs", selector: { boolean: {} } },
+          { name: "hide_inactive", selector: { boolean: {} } },
+        ],
+      },
+    ],
+  },
+  {
+    type: "expandable",
+    name: "host_stats",
+    icon: "mdi:speedometer",
+    schema: [
+      { name: "cpu_entity", selector: { entity: { domain: ["sensor"] } } },
+      { name: "ram_entity", selector: { entity: { domain: ["sensor"] } } },
+      { name: "disk_entity", selector: { entity: { domain: ["sensor"] } } },
+      { name: "temperature_entity", selector: { entity: { domain: ["sensor"] } } },
+    ],
+  },
+];
+
+// ha-form renders `name` verbatim unless given a label, and "show_addon_logs"
+// is not a label. Kept next to the schema so the two stay in step.
+const EDITOR_LABELS = {
+  title: "Title",
+  graph_height: "Map height",
+  refresh_interval: "Refresh every (0 = off)",
+  sections: "Sections & tiers",
+  data: "Live data & joins",
+  host_stats: "Host stat entities (leave empty to auto-detect)",
+  hide_inactive: "Hide inactive by default",
+  show_status_bar: "Status bar",
+  show_host_stats: "Host stats",
+  show_sparklines: "Sparklines",
+  show_legend: "Legend",
+  show_entity_finder: "Entity finder",
+  show_addon_grid: "Add-on grid",
+  show_integration_grid: "Integration grid",
+  show_integration_list: "Integration list",
+  tiers: "Tiers to draw",
+  highlight_problems: "Flag problems",
+  show_counts: "Device / entity counts",
+  discover_hardware: "Discover hardware",
+  group_by_area: "Group by area",
+  show_addon_stats: "Add-on CPU / RAM",
+  show_addon_logs: "Add-on log tail",
+  cpu_entity: "CPU",
+  ram_entity: "Memory",
+  disk_entity: "Disk",
+  temperature_entity: "Temperature",
+};
+
+// --- small formatters -------------------------------------------------------
+
+function formatBytes(n) {
+  if (typeof n !== "number" || !isFinite(n)) return null;
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let v = n;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v >= 10 || i === 0 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
+}
+
+// Coarse on purpose: this is read at a glance next to a version number, so
+// "3 days" beats "3d 4h 12m".
+function formatAge(sinceMs) {
+  if (!isFinite(sinceMs) || sinceMs < 0) return null;
+  const mins = Math.floor(sinceMs / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins} min`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 48) return `${hours} hour${hours === 1 ? "" : "s"}`;
+  return `${Math.floor(hours / 24)} days`;
+}
+
+function parseDate(value) {
+  if (!value) return null;
+  const t = Date.parse(value);
+  return isFinite(t) ? t : null;
+}
+
+function slugify(s) {
+  return String(s)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 48);
+}
+
+// A by-id path like "usb-ITead_Sonoff_Zigbee_3.0_USB_Dongle_Plus_..." carries
+// the vendor and product; the trailing serial is noise on a 32px circle.
+function prettySerialName(device) {
+  const raw = String(device.by_id || device.name || "serial");
+  const tail = raw.split("/").pop().replace(/^usb-/, "");
+  const words = tail.split(/[_-]/).filter(Boolean);
+  const trimmed = words.slice(0, 4).join(" ");
+  return trimmed || device.dev_path || "Serial device";
+}
+
+// Walks an add-on's options looking for any of `paths` inside a string value,
+// and returns the option key that matched. Recursive because options nest
+// (Zigbee2MQTT keeps its adapter under `serial.port`), and a substring test
+// rather than equality because add-ons often store a path with a suffix or
+// inside a longer device string.
+function findPathInOptions(options, paths, prefix = "") {
+  if (!options || typeof options !== "object" || !paths?.length) return null;
+  for (const [key, value] of Object.entries(options)) {
+    const label = prefix ? `${prefix}.${key}` : key;
+    if (typeof value === "string") {
+      if (paths.some((path) => path && value.includes(path))) return label;
+    } else if (Array.isArray(value)) {
+      if (value.some((v) => typeof v === "string" && paths.some((path) => path && v.includes(path)))) return label;
+    } else if (value && typeof value === "object") {
+      const hit = findPathInOptions(value, paths, label);
+      if (hit) return hit;
+    }
+  }
+  return null;
+}
+
+// Sparkline over a fixed box, normalised to its own min/max - these sit next
+// to the number they summarise, so the shape is the point, not the scale.
+function sparklinePath(values, w, h) {
+  if (!values || values.length < 2) return "";
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = max - min || 1;
+  return values
+    .map((v, i) => `${i ? "L" : "M"}${((i / (values.length - 1)) * w).toFixed(1)},${(h - ((v - min) / span) * h).toFixed(1)}`)
+    .join(" ");
+}
+
 class SystemMapCard extends HTMLElement {
+  // Lovelace calls this to open the visual editor, and to seed the config
+  // when the card is picked from the card picker.
+  static getConfigElement() {
+    return document.createElement("system-map-card-editor");
+  }
+
+  static getStubConfig() {
+    return { type: "custom:system-map-card" };
+  }
+
   setConfig(config) {
-    this._config = { title: "System Map", ...config };
+    // A null/absent option must fall back to its default rather than
+    // disabling the feature - ha-form writes `undefined` into a key when a
+    // boolean is toggled back off in some HA versions, and an entity picker
+    // that's been cleared comes back as "".
+    clearTimeout(this._refreshTimer);
+    this._config = { ...DEFAULTS, ...config };
+    for (const [k, v] of Object.entries(DEFAULTS)) {
+      if (this._config[k] === undefined || this._config[k] === null) this._config[k] = v;
+    }
+    if (!Array.isArray(this._config.tiers) || !this._config.tiers.length) this._config.tiers = DEFAULTS.tiers;
     this._built = false;
     this._loaded = false;
     this._addons = [];
@@ -337,6 +640,17 @@ class SystemMapCard extends HTMLElement {
     this._loadErrors = {};
     this._detailKey = null; // currently-open detail panel, e.g. "node:host"
     this._addonInfoCache = new Map();
+    this._addonStatsCache = new Map();
+    this._areas = [];
+    this._hardware = null; // Supervisor /hardware/info payload
+    this._system = {}; // host/os/core/supervisor/network/backups summaries
+    this._issues = []; // repairs/list_issues
+    this._systemHealth = {}; // system_health/info, domain -> info map
+    this._derived = { nodes: [], edges: [] }; // hardware nodes/edges discovered at runtime
+    this._problems = new Map(); // node key -> {unavailable, total, issues, health}
+    this._counts = new Map(); // node key -> {devices, entities, areas}
+    this._history = {}; // stat key -> [values] for the sparklines
+    this._refreshTimer = null;
     this._viewBox = null; // current pan/zoom state, {x,y,w,h} in SVG user units
     this._naturalViewBox = null; // full-fit viewBox, recomputed each render
     // Set of namespaced keys highlighted by the entity finder, or null:
@@ -387,6 +701,7 @@ class SystemMapCard extends HTMLElement {
   }
 
   _build() {
+    const cfg = this._config;
     this.innerHTML = `
       <ha-card>
         <div class="smc-header">
@@ -398,17 +713,21 @@ class SystemMapCard extends HTMLElement {
           <button class="smc-refresh" title="Refresh">&#8635;</button>
         </div>
         <div class="smc-errors" hidden></div>
-        <div class="smc-graph-wrap">
+        ${cfg.show_status_bar ? `<div class="smc-status"></div>` : ""}
+        ${cfg.show_host_stats ? `<div class="smc-stats"></div>` : ""}
+        <div class="smc-graph-wrap" style="flex:0 0 auto;height:${Number(cfg.graph_height) || DEFAULTS.graph_height}px">
           <div class="smc-loading">Loading system map…</div>
           <div class="smc-graph"></div>
           <div class="smc-zoom-controls">
             <button class="smc-zoom-in" title="Zoom in">+</button>
             <button class="smc-zoom-out" title="Zoom out">&minus;</button>
             <button class="smc-zoom-reset" title="Reset view">&#10021;</button>
+            <button class="smc-export" title="Download as PNG">&#8681;</button>
           </div>
+          ${cfg.show_legend ? `<div class="smc-legend"></div>` : ""}
         </div>
         <div class="smc-detail" hidden></div>
-        <div class="smc-finder">
+        ${cfg.show_entity_finder ? `<div class="smc-finder">
           <h3>Find an entity <span class="smc-hint">- highlights which node(s) serve it</span></h3>
           <div class="smc-entity-search">
             <input type="text" class="smc-entity-input" placeholder="e.g. switch.3d_printer_power" autocomplete="off" />
@@ -416,13 +735,13 @@ class SystemMapCard extends HTMLElement {
           </div>
           <div class="smc-entity-suggestions" hidden></div>
           <div class="smc-entity-result"></div>
-        </div>
-        <div class="smc-lists">
+        </div>` : ""}
+        ${cfg.show_integration_list ? `<div class="smc-lists">
           <div class="smc-col">
             <h3>Integrations <span class="smc-count" data-count="integrations"></span> <span class="smc-hint">- every one is also a node on the map above</span></h3>
             <div class="smc-chips" data-list="integrations"></div>
           </div>
-        </div>
+        </div>` : ""}
       </ha-card>
       <style>
         :host { display: block; height: 100%; }
@@ -433,7 +752,7 @@ class SystemMapCard extends HTMLElement {
         .smc-refresh { background: none; border: none; font-size: 1.3em; cursor: pointer; color: var(--secondary-text-color); line-height: 1; padding: 4px 8px; }
         .smc-refresh:hover { color: var(--primary-text-color); }
         .smc-errors { background: var(--error-color, #db4437); color: white; border-radius: 6px; padding: 6px 10px; font-size: 0.85em; margin-bottom: 8px; flex: 0 0 auto; }
-        .smc-graph-wrap { position: relative; flex: 1 1 auto; min-height: 380px; overflow: hidden; touch-action: none; border-radius: 8px; background: var(--secondary-background-color, #f7f7f7); }
+        .smc-graph-wrap { position: relative; overflow: hidden; touch-action: none; border-radius: 8px; background: var(--secondary-background-color, #f7f7f7); }
         .smc-loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--secondary-text-color); font-size: 0.95em; z-index: 1; background: var(--secondary-background-color, #f7f7f7); }
         .smc-loading[hidden] { display: none; }
         .smc-graph { position: absolute; inset: 0; }
@@ -481,6 +800,29 @@ class SystemMapCard extends HTMLElement {
         .smc-chip.smc-hi { border-color: #ffca28; box-shadow: 0 0 0 2px rgba(255, 202, 40, 0.55); }
         .smc-chip.smc-dim { opacity: 0.35; }
         .smc-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+        .smc-status { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 8px; flex: 0 0 auto; }
+        .smc-pill { display: inline-flex; align-items: baseline; gap: 6px; padding: 4px 10px; border-radius: 8px; background: var(--secondary-background-color, #f2f2f2); border: 1px solid var(--divider-color, transparent); border-left-width: 3px; font-size: 0.8em; cursor: pointer; color: var(--primary-text-color); }
+        .smc-pill:hover { border-color: var(--primary-color); }
+        .smc-pill .smc-pill-label { color: var(--secondary-text-color); text-transform: uppercase; letter-spacing: 0.4px; font-size: 0.85em; }
+        .smc-pill .smc-pill-value { font-weight: 600; }
+        .smc-pill.ok { border-left-color: var(--success-color, #43a047); }
+        .smc-pill.warn { border-left-color: var(--warning-color, #ff9800); }
+        .smc-pill.bad { border-left-color: var(--error-color, #db4437); }
+        .smc-pill.info { border-left-color: var(--primary-color, #3f51b5); }
+        .smc-stats { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; flex: 0 0 auto; }
+        .smc-stat { flex: 1 1 120px; min-width: 110px; padding: 6px 10px; border-radius: 8px; background: var(--secondary-background-color, #f2f2f2); }
+        .smc-stat-label { font-size: 0.72em; text-transform: uppercase; letter-spacing: 0.5px; color: var(--secondary-text-color); }
+        .smc-stat-value { font-size: 1.15em; font-weight: 600; color: var(--primary-text-color); line-height: 1.3; }
+        .smc-stat svg { display: block; width: 100%; height: 22px; overflow: visible; }
+        .smc-stat path { fill: none; stroke: var(--primary-color, #3f51b5); stroke-width: 1.5; }
+        .smc-legend { position: absolute; left: 8px; bottom: 8px; z-index: 2; display: flex; flex-wrap: wrap; gap: 4px 10px; max-width: calc(100% - 60px); padding: 6px 8px; border-radius: 6px; background: var(--card-background-color, #fff); opacity: 0.92; font-size: 0.72em; color: var(--secondary-text-color); box-shadow: 0 1px 3px rgba(0,0,0,0.25); }
+        .smc-legend span { display: inline-flex; align-items: center; gap: 4px; }
+        .smc-legend i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+        .smc-node.smc-problem circle { stroke: var(--error-color, #db4437); stroke-width: 4; }
+        .smc-problem-badge { fill: var(--error-color, #db4437); font-size: 10px; font-weight: 700; text-anchor: middle; }
+        .smc-detail-section { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--divider-color, #ddd); }
+        .smc-detail-section h4 { margin: 0 0 4px; font-size: 0.85em; font-weight: 600; color: var(--secondary-text-color); }
+        .smc-log { margin: 0; max-height: 160px; overflow: auto; font-family: var(--code-font-family, monospace); font-size: 0.75em; white-space: pre-wrap; word-break: break-word; background: var(--card-background-color, #fff); border-radius: 6px; padding: 6px 8px; }
       </style>
     `;
 
@@ -517,6 +859,8 @@ class SystemMapCard extends HTMLElement {
       if (addonNode) return this._openDetail("addon", addonNode.getAttribute("data-node-addon"));
       const entryNode = ev.target.closest("[data-node-entry]");
       if (entryNode) return this._openDetail("entry", entryNode.getAttribute("data-node-entry"));
+      const pill = ev.target.closest("[data-status]");
+      if (pill) return this._openDetail("status", pill.getAttribute("data-status"));
       const chip = ev.target.closest("[data-chip]");
       if (chip) return this._openDetail(chip.getAttribute("data-chip-kind"), chip.getAttribute("data-chip"));
       const close = ev.target.closest(".smc-detail-close");
@@ -601,6 +945,64 @@ class SystemMapCard extends HTMLElement {
     this.querySelector(".smc-zoom-in").addEventListener("click", () => this._zoomBy(0.8));
     this.querySelector(".smc-zoom-out").addEventListener("click", () => this._zoomBy(1.25));
     this.querySelector(".smc-zoom-reset").addEventListener("click", () => this._resetView());
+    this.querySelector(".smc-export").addEventListener("click", () => this._exportPng());
+  }
+
+  // Renders the *whole* map, not the current viewport - the point of an
+  // export is the bit that didn't fit on screen. Inlines the computed colours
+  // for the handful of CSS custom properties the SVG references, since a
+  // detached <img> resolves none of the theme's variables.
+  _exportPng() {
+    const svg = this.querySelector(".smc-graph svg");
+    const nat = this._naturalViewBox;
+    if (!svg || !nat) return;
+    const clone = svg.cloneNode(true);
+    clone.setAttribute("viewBox", `${nat.x} ${nat.y} ${nat.w} ${nat.h}`);
+    clone.setAttribute("width", nat.w);
+    clone.setAttribute("height", nat.h);
+
+    const styles = getComputedStyle(this);
+    const resolve = (value) =>
+      String(value).replace(/var\(\s*(--[\w-]+)\s*(?:,\s*([^)]+))?\)/g, (_, name, fallback) =>
+        (styles.getPropertyValue(name) || fallback || "#888").trim()
+      );
+    for (const el of clone.querySelectorAll("*")) {
+      for (const attr of ["fill", "stroke", "style"]) {
+        const value = el.getAttribute(attr);
+        if (value && value.includes("var(")) el.setAttribute(attr, resolve(value));
+      }
+    }
+    clone.insertBefore(
+      Object.assign(document.createElementNS("http://www.w3.org/2000/svg", "style"), {
+        textContent: resolve(this.querySelector("style")?.textContent || ""),
+      }),
+      clone.firstChild
+    );
+
+    const blob = new Blob([new XMLSerializer().serializeToString(clone)], { type: "image/svg+xml;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => {
+      const scale = 2; // readable node labels at the sizes this map runs to
+      const canvas = document.createElement("canvas");
+      canvas.width = nat.w * scale;
+      canvas.height = nat.h * scale;
+      const ctx = canvas.getContext("2d");
+      ctx.fillStyle = (styles.getPropertyValue("--card-background-color") || "#fff").trim();
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      URL.revokeObjectURL(url);
+      const link = document.createElement("a");
+      link.download = `system-map-${new Date().toISOString().slice(0, 10)}.png`;
+      link.href = canvas.toDataURL("image/png");
+      link.click();
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      this._loadErrors.export = "the browser refused to rasterise the map";
+      this._renderErrors();
+    };
+    img.src = url;
   }
 
   _zoomBy(factor, cx, cy) {
@@ -641,6 +1043,7 @@ class SystemMapCard extends HTMLElement {
 
   _buildEntityFinder() {
     const input = this.querySelector(".smc-entity-input");
+    if (!input) return; // finder switched off in the config
     const suggestionsEl = this.querySelector(".smc-entity-suggestions");
     const clearBtn = this.querySelector(".smc-entity-clear");
 
@@ -702,8 +1105,8 @@ class SystemMapCard extends HTMLElement {
   // Fetched lazily (only when the entity finder is actually used) rather
   // than on card load - see file header for why this used to make the
   // whole card look stuck on "Loading".
-  async _ensureEntityRegistry() {
-    if (this._entityRegistry.length) return;
+  async _ensureEntityRegistry(force = false) {
+    if (this._entityRegistry.length && !force) return;
     if (this._entityRegistryLoading) return this._entityRegistryLoading;
     this._entityRegistryLoading = (async () => {
       try {
@@ -806,7 +1209,7 @@ class SystemMapCard extends HTMLElement {
     if (curated.length) {
       return {
         keys: curated.map((id) => `node:${id}`),
-        names: curated.map((id) => HUB_LAYOUT.find((n) => n.id === id)?.label || id),
+        names: curated.map((id) => this._node(id)?.label || id),
       };
     }
 
@@ -818,7 +1221,7 @@ class SystemMapCard extends HTMLElement {
       this._findEntry(reg.platform) ||
       null;
 
-    const curatedNode = HUB_LAYOUT.find((n) => n.kind === "integration" && n.domain === (entry?.domain || reg.platform));
+    const curatedNode = this._layout().find((n) => n.kind === "integration" && n.domain === (entry?.domain || reg.platform));
     if (curatedNode) return { keys: [`node:${curatedNode.id}`], names: [curatedNode.label] };
 
     if (entry) {
@@ -855,11 +1258,60 @@ class SystemMapCard extends HTMLElement {
 
   _clearHighlight(clearResultText = true) {
     this._highlight = null;
-    if (clearResultText) this.querySelector(".smc-entity-result").textContent = "";
+    const resultEl = this.querySelector(".smc-entity-result");
+    if (clearResultText && resultEl) resultEl.textContent = "";
     this._renderHighlightables();
   }
 
   // --- data -------------------------------------------------------------
+
+  // Every fetch goes through here so a failing endpoint can never take the
+  // card down with it: the error is recorded against its own key (surfaced
+  // in the error strip) and the rest of the card renders on whatever did
+  // arrive. Several of these are Supervisor-only or version-dependent, and
+  // an instance without them should degrade, not break.
+  _fetch(key, message, assign) {
+    return this._hass.connection
+      .sendMessagePromise(message)
+      .then((res) => {
+        assign(res?.data ?? res);
+        delete this._loadErrors[key];
+      })
+      .catch((e) => {
+        this._loadErrors[key] = describeError(e);
+      });
+  }
+
+  _supervisor(key, endpoint, assign) {
+    return this._fetch(key, { type: "supervisor/api", endpoint, method: "get" }, assign);
+  }
+
+  // system_health/info streams: it answers with the domains it knows about
+  // and then pushes each one's data as the (sometimes slow) health callbacks
+  // resolve. So it's a subscription, not a request - collect for a moment,
+  // then stop listening and render whatever arrived. Older cores answered it
+  // as a plain command, hence the fallback.
+  async _fetchSystemHealth() {
+    const conn = this._hass.connection;
+    const absorb = (msg) => {
+      const data = msg?.data ?? msg;
+      if (data && typeof data === "object") Object.assign(this._systemHealth, data);
+    };
+    try {
+      if (typeof conn.subscribeMessage === "function") {
+        const unsub = await conn.subscribeMessage(absorb, { type: "system_health/info" });
+        await new Promise((resolve) => setTimeout(resolve, 2500));
+        try {
+          await unsub();
+        } catch (_) {}
+      } else {
+        absorb(await conn.sendMessagePromise({ type: "system_health/info" }));
+      }
+      delete this._loadErrors.system_health;
+    } catch (e) {
+      this._loadErrors.system_health = describeError(e);
+    }
+  }
 
   async _refreshData() {
     this._loadErrors = {};
@@ -894,9 +1346,43 @@ class SystemMapCard extends HTMLElement {
         this._loadErrors.devices = describeError(e);
       });
 
-    await Promise.all([addonsP, entriesP, devicesP]);
-    this._addonInfoCache.clear();
+    // Everything else is enrichment: slower, individually optional, and
+    // each one already isolated by _fetch. Awaited together with the core
+    // three so the first paint has them, but none can block it on failure.
+    const extras = [
+      this._fetch("areas", { type: "config/area_registry/list" }, (r) => {
+        this._areas = Array.isArray(r) ? r : [];
+      }),
+      this._supervisor("host", "/host/info", (r) => (this._system.host = r)),
+      this._supervisor("core", "/core/info", (r) => (this._system.core = r)),
+      this._supervisor("os", "/os/info", (r) => (this._system.os = r)),
+      this._supervisor("supervisor", "/supervisor/info", (r) => (this._system.supervisor = r)),
+      this._supervisor("network", "/network/info", (r) => (this._system.network = r)),
+      this._supervisor("backups", "/backups", (r) => (this._system.backups = r?.backups ?? [])),
+      this._fetch("repairs", { type: "repairs/list_issues" }, (r) => {
+        this._issues = r?.issues ?? (Array.isArray(r) ? r : []);
+      }),
+      this._fetchSystemHealth(),
+    ];
+    if (this._config.discover_hardware) {
+      extras.push(this._supervisor("hardware", "/hardware/info", (r) => (this._hardware = r)));
+    }
+    // The problem join needs the entity registry up front, not lazily - it's
+    // what maps an unavailable entity back to the node that serves it.
+    if (this._config.highlight_problems || this._config.show_counts) extras.push(this._ensureEntityRegistry(true));
+
+    await Promise.all([addonsP, entriesP, devicesP, ...extras]);
+    // Deliberately NOT clearing _addonInfoCache here: it backs the derived
+    // hardware edges, so clearing it on every refresh would re-fetch
+    // /addons/<slug>/info for every add-on once per interval. Freshness only
+    // matters for the panel being opened, and _openDetail invalidates that
+    // one entry itself.
+    this._addonStatsCache.clear();
     this._lastRefreshed = new Date();
+
+    this._deriveHardware();
+    this._buildProblemIndex();
+    this._buildCounts();
 
     // Belt-and-suspenders: whatever happens in rendering, the loading
     // overlay must not get stuck showing forever, and a render bug should
@@ -911,16 +1397,219 @@ class SystemMapCard extends HTMLElement {
       const loadingEl = this.querySelector(".smc-loading");
       if (loadingEl) loadingEl.hidden = true;
     }
+
+    // Deliberately after the first paint, and deliberately not awaited: both
+    // are slow, neither changes the shape of the map, and the derived
+    // hardware edges need one /addons/<slug>/info per add-on.
+    if (this._config.discover_hardware) this._loadAddonOptions();
+    if (this._config.show_sparklines) this._loadHistory();
+    this._scheduleRefresh();
+  }
+
+  _scheduleRefresh() {
+    clearTimeout(this._refreshTimer);
+    const secs = Number(this._config.refresh_interval) || 0;
+    if (secs > 0) this._refreshTimer = setTimeout(() => this._refreshData(), Math.max(10, secs) * 1000);
+  }
+
+  disconnectedCallback() {
+    clearTimeout(this._refreshTimer);
+  }
+
+  // Ownership edges are derived by matching a discovered device path against
+  // the add-on's own options, which means one /addons/<slug>/info per add-on.
+  // Sequential on purpose: 30-odd Supervisor calls fired at once is a visible
+  // stall on a Pi, and nothing is waiting on the result.
+  async _loadAddonOptions() {
+    for (const addon of this._addons) {
+      if (!this.isConnected) return; // card removed mid-walk (dashboard switched)
+      if (this._addonInfoCache.has(addon.slug)) continue;
+      await this._fetchAddonInfo(addon.slug);
+    }
+    if (!this.isConnected) return;
+    this._deriveHardware();
+    if (!this._detailKey) this._renderGraph();
+  }
+
+  // One hour of the two headline stats, downsampled to fit a ~60px sparkline.
+  async _loadHistory() {
+    const stats = this._hostStats().filter((s) => s.entity && this._hass.states[s.entity]);
+    if (!stats.length) return;
+    const end = new Date();
+    const start = new Date(end.getTime() - 60 * 60 * 1000);
+    try {
+      const res = await this._hass.connection.sendMessagePromise({
+        type: "history/history_during_period",
+        start_time: start.toISOString(),
+        end_time: end.toISOString(),
+        entity_ids: stats.map((s) => s.entity),
+        minimal_response: true,
+        no_attributes: true,
+      });
+      this._history = {};
+      for (const stat of stats) {
+        const points = (res?.[stat.entity] || [])
+          .map((pt) => Number(pt.s ?? pt.state))
+          .filter((v) => isFinite(v));
+        if (points.length > 1) this._history[stat.key] = points;
+      }
+      this._renderHostStats();
+    } catch (e) {
+      this._loadErrors.history = describeError(e);
+    }
   }
 
   _renderAll() {
     this._renderErrors();
+    this._renderStatusBar();
+    this._renderLegend();
     this._renderGraph();
     this._renderChipList("integrations");
     this._renderHostStats();
     this._renderDetail().catch((e) => console.error("system-map-card: detail render failed", e));
     const btn = this.querySelector(".smc-refresh");
     if (btn && this._lastRefreshed) btn.title = `Refresh (last updated ${this._lastRefreshed.toLocaleTimeString()})`;
+  }
+
+  // The strip along the top: the handful of numbers you'd check first on any
+  // system monitor, joined from six Supervisor endpoints, the repairs
+  // registry and the update entities. Each returns a tone so a stale backup
+  // or a lost uplink reads as a problem without having to be read.
+  _statusItems() {
+    const items = [];
+    const { host, core, os, supervisor, network, backups } = this._system;
+
+    if (core?.version) {
+      items.push({
+        key: "core",
+        label: "Core",
+        value: core.version,
+        tone: core.update_available ? "warn" : "ok",
+        note: core.update_available ? `update to ${core.version_latest} available` : "up to date",
+      });
+    }
+    if (os?.version) {
+      items.push({
+        key: "os",
+        label: "OS",
+        value: os.version,
+        tone: os.update_available ? "warn" : "ok",
+        note: [os.board, os.update_available ? `update to ${os.version_latest} available` : "up to date"].filter(Boolean).join(" - "),
+      });
+    }
+    if (supervisor?.version) {
+      items.push({
+        key: "supervisor",
+        label: "Supervisor",
+        value: supervisor.version,
+        tone: supervisor.update_available ? "warn" : "ok",
+        note: supervisor.channel ? `${supervisor.channel} channel` : "",
+      });
+    }
+
+    // Supervisor reports host disk in GB, not bytes - the one endpoint here
+    // that doesn't use bytes, so it's converted rather than formatBytes'd.
+    if (typeof host?.disk_free === "number" && typeof host?.disk_total === "number" && host.disk_total > 0) {
+      const usedPct = Math.round(((host.disk_total - host.disk_free) / host.disk_total) * 100);
+      items.push({
+        key: "disk",
+        label: "Disk",
+        value: `${host.disk_free.toFixed(1)} GB free`,
+        tone: usedPct >= 90 ? "bad" : usedPct >= 75 ? "warn" : "ok",
+        note: `${usedPct}% of ${host.disk_total.toFixed(0)} GB used`,
+      });
+    }
+
+    // boot_timestamp is microseconds since the epoch; the magnitude guard is
+    // there because that's easy to get wrong and a 55,000-year uptime is a
+    // funnier bug to ship than it is to debug.
+    if (host?.boot_timestamp) {
+      const bootMs = host.boot_timestamp > 1e14 ? host.boot_timestamp / 1000 : host.boot_timestamp * 1000;
+      const age = formatAge(Date.now() - bootMs);
+      if (age) items.push({ key: "uptime", label: "Uptime", value: age, tone: "info", note: `booted ${new Date(bootMs).toLocaleString()}` });
+    }
+
+    const updates = this._pendingUpdates();
+    items.push({
+      key: "updates",
+      label: "Updates",
+      value: updates.length ? `${updates.length} pending` : "none pending",
+      tone: updates.length ? "warn" : "ok",
+      note: updates.slice(0, 8).join(", "),
+    });
+
+    if (Array.isArray(backups)) {
+      const newest = backups.map((b) => parseDate(b.date)).filter(Boolean).sort((a, b) => b - a)[0];
+      const ageMs = newest ? Date.now() - newest : null;
+      items.push({
+        key: "backup",
+        label: "Backup",
+        value: newest ? `${formatAge(ageMs)} ago` : "none",
+        tone: !newest || ageMs > 14 * 864e5 ? "bad" : ageMs > 7 * 864e5 ? "warn" : "ok",
+        note: `${backups.length} backup${backups.length === 1 ? "" : "s"} stored`,
+      });
+    }
+
+    if (network && ("host_internet" in network || "supervisor_internet" in network)) {
+      const up = network.host_internet !== false && network.supervisor_internet !== false;
+      items.push({ key: "internet", label: "Internet", value: up ? "connected" : "no connectivity", tone: up ? "ok" : "bad", note: "" });
+    }
+
+    const open = this._issues.filter((i) => !i.ignored);
+    if (open.length) {
+      items.push({
+        key: "repairs",
+        label: "Repairs",
+        value: `${open.length} open`,
+        tone: open.some((i) => i.severity === "critical" || i.is_fixable === false) ? "bad" : "warn",
+        note: open.slice(0, 6).map((i) => i.domain).join(", "),
+      });
+    }
+    return items;
+  }
+
+  // Both halves of "what needs updating": HA's own update entities (Core, OS,
+  // HACS, firmware...) and the Supervisor add-on list, which reports add-on
+  // updates through its own flag rather than an entity.
+  _pendingUpdates() {
+    const out = [];
+    for (const [entityId, st] of Object.entries(this._hass?.states || {})) {
+      if (!entityId.startsWith("update.") || st.state !== "on") continue;
+      out.push(st.attributes?.friendly_name || entityId.replace("update.", ""));
+    }
+    for (const addon of this._addons) {
+      if (addon.update_available) out.push(addon.name || addon.slug);
+    }
+    return [...new Set(out)];
+  }
+
+  _renderStatusBar() {
+    const el = this.querySelector(".smc-status");
+    if (!el) return;
+    const items = this._statusItems();
+    this._statusByKey = new Map(items.map((i) => [i.key, i]));
+    el.innerHTML = items
+      .map(
+        (i) => `<span class="smc-pill ${i.tone}" data-status="${escapeHtml(i.key)}" title="${escapeHtml(i.note || "")}">
+          <span class="smc-pill-label">${escapeHtml(i.label)}</span><span class="smc-pill-value">${escapeHtml(i.value)}</span>
+        </span>`
+      )
+      .join("");
+  }
+
+  _renderLegend() {
+    const el = this.querySelector(".smc-legend");
+    if (!el) return;
+    const swatches = [
+      ["Running / loaded", COLORS.started],
+      ["Stopped / disabled", COLORS.stopped],
+      ["Error", COLORS.error],
+      ["Hardware", COLORS.hardware],
+      ...TIER_ORDER.filter((t) => this._config.tiers.includes(t)).map((t) => [TIER_META[t], TIER_COLORS[t]]),
+    ];
+    el.innerHTML = swatches
+      .map(([label, color]) => `<span><i style="background:${color}"></i>${escapeHtml(label)}</span>`)
+      .join("");
   }
 
   _renderErrors() {
@@ -950,6 +1639,209 @@ class SystemMapCard extends HTMLElement {
     return this._devices.filter((d) => (d.config_entries || []).includes(entry.entry_id)).length;
   }
 
+  // --- derived model ------------------------------------------------------
+
+  // The effective node list: the curated layout plus whatever hardware was
+  // discovered, with the non-hardware tiers pushed down far enough to clear
+  // however many hardware rows this instance actually needs. Nothing else in
+  // the card reads HUB_LAYOUT directly, so a discovered device is a
+  // first-class node everywhere - edges, highlights, detail, the lot.
+  _layout() {
+    const shown = new Set(this._config.tiers);
+    const hw = this._derived.nodes;
+    const offset = (hwRowCount(hw.length) - 1) * HW_ROW_H;
+
+    const out = [];
+    for (const n of HUB_LAYOUT) {
+      if (!shown.has(n.tier)) continue;
+      out.push(n.tier === "hardware" ? n : { ...n, y: n.y + offset });
+    }
+    if (shown.has("hardware")) out.push(...hw);
+    return out;
+  }
+
+  _edges() {
+    return [...HUB_EDGES, ...this._derived.edges];
+  }
+
+  _node(id) {
+    return this._layout().find((n) => n.id === id);
+  }
+
+  // Builds the hardware tier from Supervisor's /hardware/info: every drive,
+  // and every serial device that has a stable by-id path (which is what a
+  // Zigbee/Z-Wave dongle looks like - the rest of `devices` is thousands of
+  // sysfs entries nobody wants on a map). Ownership edges are then derived by
+  // looking for those exact paths in each add-on's own options, so "which
+  // add-on owns this dongle" is read off the configuration rather than
+  // asserted by hand.
+  _deriveHardware() {
+    if (!this._config.discover_hardware || !this._hardware) {
+      this._derived = { nodes: [], edges: [] };
+      return;
+    }
+    const devices = Array.isArray(this._hardware.devices) ? this._hardware.devices : [];
+    const drives = Array.isArray(this._hardware.drives) ? this._hardware.drives : [];
+
+    const serial = devices
+      .filter((d) => d.subsystem === "tty" && d.by_id)
+      .map((d) => ({
+        id: `hw_tty_${slugify(d.by_id)}`,
+        label: prettySerialName(d),
+        icon: "usb-port",
+        paths: [d.by_id, d.dev_path].filter(Boolean),
+        detail: { Kind: "Serial / USB device", Path: d.dev_path, "By-id": d.by_id, Subsystem: d.subsystem },
+      }));
+
+    const disks = drives.map((d) => {
+      const mounts = (d.filesystems || []).flatMap((fs) => fs.mount_points || []);
+      return {
+        id: `hw_drive_${slugify(d.id || d.serial || d.model || "drive")}`,
+        label: [d.vendor, d.model].filter(Boolean).join(" ") || d.id || "Drive",
+        icon: "harddisk",
+        paths: [...mounts, ...(d.filesystems || []).map((fs) => fs.device).filter(Boolean)],
+        detail: {
+          Kind: "Drive",
+          Model: [d.vendor, d.model].filter(Boolean).join(" "),
+          Size: formatBytes(d.size),
+          Bus: d.connection_bus,
+          Removable: d.removable ? "yes" : "no",
+          "Mounted at": mounts.join(", ") || "not mounted",
+          Serial: d.serial,
+        },
+      };
+    });
+
+    const found = [...disks, ...serial];
+    // Host first in the row, then the discovered devices around it.
+    const nodes = found.map((h, i) => {
+      const { row, col } = hwSlot(i);
+      return { ...h, kind: "hardware", tier: "hardware", derived: true, r: 32, x: hwColX(col), y: 150 + row * HW_ROW_H };
+    });
+
+    // Every discovered device is physically attached to the host, so that
+    // edge is always true; the interesting one is which add-on claims it.
+    const edges = nodes.map((n) => ["host", n.id, { label: n.icon === "harddisk" ? "disk" : "USB" }]);
+    for (const n of nodes) {
+      for (const [slug, info] of this._addonInfoCache) {
+        if (!info || info._error) continue;
+        const hit = findPathInOptions(info.options, n.paths);
+        if (!hit) continue;
+        const addonNode = HUB_LAYOUT.find((h) => h.kind === "addon" && h.slug === slug);
+        (n.usedBy = n.usedBy || []).push({ slug, name: info.name || slug, option: hit });
+        if (addonNode) edges.push([n.id, addonNode.id, { label: `owns (${hit})` }]);
+      }
+    }
+
+    this._derived = { nodes, edges };
+  }
+
+  // Resolves an entity registry entry to node key(s) once per
+  // platform+entry combination - called for every entity in the registry, so
+  // the memo is what keeps the problem join from being O(entities x entries).
+  _targetKeys(reg) {
+    const memoKey = `${reg.platform}|${reg.config_entry_id || ""}`;
+    if (!this._targetMemo) this._targetMemo = new Map();
+    if (this._targetMemo.has(memoKey)) return this._targetMemo.get(memoKey);
+    const keys = this._mapTargetForRegistryEntry(reg)?.keys || [];
+    this._targetMemo.set(memoKey, keys);
+    return keys;
+  }
+
+  // The join that turns the map from a diagram into a monitor: an add-on can
+  // be "started" and an integration "loaded" while every entity they serve is
+  // dead, and only this catches that.
+  _buildProblemIndex() {
+    this._targetMemo = new Map();
+    this._problems = new Map();
+    if (!this._config.highlight_problems) return;
+
+    const bump = (key, field, by = 1) => {
+      const rec = this._problems.get(key) || { unavailable: 0, entities: 0, issues: [], health: null };
+      rec[field] += by;
+      this._problems.set(key, rec);
+    };
+
+    for (const reg of this._entityRegistry) {
+      if (reg.disabled_by) continue;
+      const st = this._hass?.states?.[reg.entity_id];
+      const dead = !st || st.state === "unavailable" || st.state === "unknown";
+      for (const key of this._targetKeys(reg)) {
+        bump(key, "entities");
+        if (dead) bump(key, "unavailable");
+      }
+    }
+
+    // A repair issue is raised against a domain, so it lands on whichever
+    // node that domain resolves to - the same resolution the entity finder
+    // uses, so an issue and an entity for one integration agree on a node.
+    for (const issue of this._issues) {
+      if (issue.ignored) continue;
+      for (const key of this._keysForDomain(issue.domain)) {
+        const rec = this._problems.get(key) || { unavailable: 0, entities: 0, issues: [], health: null };
+        rec.issues.push(issue);
+        this._problems.set(key, rec);
+      }
+    }
+
+    for (const [domain, info] of Object.entries(this._systemHealth || {})) {
+      for (const key of this._keysForDomain(domain)) {
+        const rec = this._problems.get(key) || { unavailable: 0, entities: 0, issues: [], health: null };
+        rec.health = info?.info ?? info;
+        this._problems.set(key, rec);
+      }
+    }
+  }
+
+  _keysForDomain(domain) {
+    if (!domain) return [];
+    return this._targetKeys({ platform: domain, config_entry_id: null });
+  }
+
+  // Device / entity / area counts per node, so an integration tile reads
+  // "12 devices - 84 entities - 4 areas" instead of nothing.
+  _buildCounts() {
+    this._counts = new Map();
+    if (!this._config.show_counts) return;
+
+    const areaById = new Map(this._areas.map((a) => [a.area_id, a]));
+    const deviceById = new Map(this._devices.map((d) => [d.id, d]));
+    const rec = (key) => {
+      let r = this._counts.get(key);
+      // areas is a count per area, not a set, so "which area is this
+      // integration mostly in" has a real answer for the grouped layout.
+      if (!r) this._counts.set(key, (r = { devices: new Set(), entities: 0, areas: new Map() }));
+      return r;
+    };
+
+    for (const reg of this._entityRegistry) {
+      if (reg.disabled_by) continue;
+      const device = reg.device_id ? deviceById.get(reg.device_id) : null;
+      const areaId = reg.area_id || device?.area_id || null;
+      for (const key of this._targetKeys(reg)) {
+        const r = rec(key);
+        r.entities++;
+        if (reg.device_id) r.devices.add(reg.device_id);
+        if (areaId && areaById.has(areaId)) r.areas.set(areaId, (r.areas.get(areaId) || 0) + 1);
+      }
+    }
+  }
+
+  // Config overrides win; otherwise fall back to the System Monitor entity
+  // names this instance actually has (see the HOST_STATS comment).
+  _hostStats() {
+    const overrides = {
+      cpu: this._config.cpu_entity,
+      ram: this._config.ram_entity,
+      disk: this._config.disk_entity,
+    };
+    const stats = HOST_STATS.map((s) => (overrides[s.key] ? { ...s, entity: overrides[s.key] } : s));
+    if (this._config.temperature_entity) {
+      stats.push({ key: "temp", label: "Temperature", entity: this._config.temperature_entity, suffix: "°" });
+    }
+    return stats;
+  }
+
   // Resolves a hub node's live status + short sub-label in one place, so
   // both the graph and the hide-inactive filter agree on what "inactive"
   // means for that node.
@@ -970,21 +1862,62 @@ class SystemMapCard extends HTMLElement {
       const count = this._deviceCountForDomain(n.deviceCountDomain);
       if (count !== null) sub = `${count} device${count === 1 ? "" : "s"}`;
     }
-    return { status, sub };
+
+    // Counts replace the hand-set device count wherever the registries can
+    // actually answer for this node, which is most of them.
+    const counts = this._counts.get(`node:${n.id}`);
+    if (counts && (counts.devices.size || counts.entities)) {
+      sub = [counts.devices.size ? `${counts.devices.size} dev` : "", counts.entities ? `${counts.entities} ent` : ""]
+        .filter(Boolean)
+        .join(" · ");
+    }
+    if (n.usedBy?.length) sub = `used by ${n.usedBy.map((u) => u.name).join(", ")}`;
+
+    // A problem outranks whatever the sub-label was going to say - the whole
+    // point of the join is that it's visible without clicking.
+    const problem = this._problemFor(`node:${n.id}`);
+    if (problem) sub = problem.label;
+    return { status, sub, problem };
+  }
+
+  // Reduces the problem index for one node key to the single worst thing
+  // worth putting on a 30px circle, or null when there's nothing to say.
+  _problemFor(key) {
+    if (!this._config.highlight_problems) return null;
+    const rec = this._problems.get(key);
+    if (!rec) return null;
+    if (rec.unavailable > 0) {
+      return {
+        severity: "bad",
+        label: `${rec.unavailable}/${rec.entities} unavailable`,
+        badge: String(rec.unavailable),
+        reason: `${rec.unavailable} of ${rec.entities} entities are unavailable or unknown`,
+      };
+    }
+    if (rec.issues?.length) {
+      return {
+        severity: "warn",
+        label: `${rec.issues.length} repair issue${rec.issues.length === 1 ? "" : "s"}`,
+        badge: "!",
+        reason: rec.issues.map((i) => i.issue_id || i.translation_key || "issue").join(", "),
+      };
+    }
+    return null;
   }
 
   // --- graph rendering ----------------------------------------------------
 
   _renderGraph() {
     this._nodePositions = new Map();
+    const layout = this._layout();
     const hidden = new Set();
     if (this._hideInactive) {
-      for (const n of HUB_LAYOUT) {
+      for (const n of layout) {
         if (n.kind === "host" || n.kind === "hardware") continue;
         if (isInactiveStatus(this._nodeState(n).status)) hidden.add(n.id);
       }
     }
-    const visible = HUB_LAYOUT.filter((n) => !hidden.has(n.id));
+    const visible = layout.filter((n) => !hidden.has(n.id));
     const dimming = !!(this._highlight && this._highlight.size);
 
     // Tier bounding boxes - computed from the actual visible node positions
@@ -1011,10 +1944,12 @@ class SystemMapCard extends HTMLElement {
       .map((t) => `<text class="smc-tier-label" x="${boxes[t].minX + 4}" y="${boxes[t].minY - 10}" style="fill:${TIER_COLORS[t]}">${escapeHtml(TIER_META[t])}</text>`)
       .join("");
 
-    const edgesSvg = HUB_EDGES.filter(([fromId, toId]) => !hidden.has(fromId) && !hidden.has(toId))
+    const byId = new Map(layout.map((n) => [n.id, n]));
+    const edgesSvg = this._edges()
+      .filter(([fromId, toId]) => !hidden.has(fromId) && !hidden.has(toId))
       .map(([fromId, toId, opts]) => {
-        const from = HUB_LAYOUT.find((n) => n.id === fromId);
-        const to = HUB_LAYOUT.find((n) => n.id === toId);
+        const from = byId.get(fromId);
+        const to = byId.get(toId);
         if (!from || !to) return "";
         const edgeHi = !!(this._highlight?.has(`node:${fromId}`) && this._highlight?.has(`node:${toId}`));
         const cls = "smc-edge" + (opts?.dashed ? " dashed" : "") + (dimming && !edgeHi ? " smc-dim" : "");
@@ -1028,11 +1963,12 @@ class SystemMapCard extends HTMLElement {
 
     const nodesSvg = visible
       .map((n) => {
-        const { status, sub } = this._nodeState(n);
+        const { status, sub, problem } = this._nodeState(n);
         const color = colorFor(status);
         this._nodePositions.set(`node:${n.id}`, { x: n.x, y: n.y, r: n.r });
         const isHi = !!this._highlight?.has(`node:${n.id}`);
-        const cls = "smc-node" + (dimming ? (isHi ? " smc-hi" : " smc-dim") : "");
+        const cls =
+          "smc-node" + (problem ? " smc-problem" : "") + (dimming ? (isHi ? " smc-hi" : " smc-dim") : "");
         const iconPath = n.icon ? ICON_PATHS[n.icon] : null;
         const iconSize = n.r * 1.15;
         const iconSvg = iconPath
@@ -1043,6 +1979,7 @@ class SystemMapCard extends HTMLElement {
             <circle cx="${n.x}" cy="${n.y}" r="${n.r}" fill="${color}" />
             ${iconSvg}
             ${n.badge ? `<text class="smc-badge" x="${n.x}" y="${n.y - n.r - 10}">${escapeHtml(n.badge)}</text>` : ""}
+            ${problem ? `<circle cx="${n.x + n.r * 0.72}" cy="${n.y - n.r * 0.72}" r="9" fill="var(--error-color, #db4437)" stroke="var(--card-background-color, #fff)" stroke-width="2" /><text class="smc-problem-badge" x="${n.x + n.r * 0.72}" y="${n.y - n.r * 0.72 + 4}" style="fill:#fff">${escapeHtml(problem.badge)}</text>` : ""}
             <text x="${n.x}" y="${n.y + n.r + 16}">${escapeHtml(n.label)}</text>
             ${sub ? `<text class="smc-sub" x="${n.x}" y="${n.y + n.r + 30}">${escapeHtml(sub)}</text>` : ""}
           </g>`;
@@ -1054,14 +1991,14 @@ class SystemMapCard extends HTMLElement {
     // from the map. Leftover add-ons first, then *every* config entry, so
     // each integration has a real node the entity finder can point at
     // instead of reporting it as unmodeled.
-    const pinnedSlugs = new Set(HUB_LAYOUT.filter((n) => n.kind === "addon").map((n) => n.slug));
+    const pinnedSlugs = new Set(layout.filter((n) => n.kind === "addon").map((n) => n.slug));
     let otherAddons = this._addons.filter((a) => !pinnedSlugs.has(a.slug));
     if (this._hideInactive) otherAddons = otherAddons.filter((a) => !isInactiveStatus(addonStatus(a)));
     const addonItems = [...otherAddons]
       .sort((a, b) => (a.name || "").localeCompare(b.name || ""))
       .map((a) => ({ kind: "addon", key: a.slug, label: a.name, color: colorFor(addonStatus(a)) }));
 
-    const pinnedDomains = new Set(HUB_LAYOUT.filter((n) => n.kind === "integration").map((n) => n.domain));
+    const pinnedDomains = new Set(layout.filter((n) => n.kind === "integration").map((n) => n.domain));
     let otherEntries = this._entries.filter((e) => !pinnedDomains.has(e.domain));
     if (this._hideInactive) otherEntries = otherEntries.filter((e) => !isInactiveStatus(entryStatus(e)));
     otherEntries = [...otherEntries].sort((a, b) => (a.domain || "").localeCompare(b.domain || ""));
@@ -1077,26 +2014,33 @@ class SystemMapCard extends HTMLElement {
       color: colorFor(entryStatus(e)),
     }));
 
-    const addonGrid = this._gridSection({
-      items: addonItems,
-      startY: GRID_START_Y,
-      geom: OTHER_GRID,
-      color: OTHER_GRID_COLOR,
-      label: "Other add-ons & tools",
-      dataAttr: "data-node-addon",
-      dimming,
-    });
-    const entryGrid = this._gridSection({
-      items: entryItems,
-      startY: GRID_START_Y + addonGrid.height,
-      geom: ENTRY_GRID,
-      color: ENTRY_GRID_COLOR,
-      label: "Integrations (every config entry)",
-      dataAttr: "data-node-entry",
-      dimming,
-    });
-    const gridsHeight = addonGrid.height + entryGrid.height;
-    const totalHeight = gridsHeight ? GRID_START_Y + gridsHeight : GRID_START_Y - 40;
+    const gridTop = GRID_START_Y + (hwRowCount(this._derived.nodes.length) - 1) * HW_ROW_H;
+    const grids = [];
+    let cursor = gridTop;
+    const addGrid = (items, geom, color, label, dataAttr) => {
+      const section = this._gridSection({ items, startY: cursor, geom, color, label, dataAttr, dimming });
+      cursor += section.height;
+      grids.push(section.svg);
+    };
+
+    if (this._config.show_addon_grid) {
+      addGrid(addonItems, OTHER_GRID, OTHER_GRID_COLOR, "Other add-ons & tools", "data-node-addon");
+    }
+    if (this._config.show_integration_grid) {
+      if (this._config.group_by_area) {
+        // One labelled grid per area, so the map answers "what serves the
+        // kitchen" as directly as it answers "what serves MQTT". An
+        // integration is filed under the area holding most of its devices,
+        // never in two places at once.
+        for (const [areaName, items] of this._groupByArea(entryItems)) {
+          addGrid(items, ENTRY_GRID, ENTRY_GRID_COLOR, `Integrations - ${areaName}`, "data-node-entry");
+        }
+      } else {
+        addGrid(entryItems, ENTRY_GRID, ENTRY_GRID_COLOR, "Integrations (every config entry)", "data-node-entry");
+      }
+    }
+    const gridsSvg = grids.join("");
+    const totalHeight = cursor > gridTop ? cursor : gridTop - 40;
 
     const natural = { x: 0, y: 0, w: 1220, h: totalHeight };
     this._naturalViewBox = natural;
@@ -1108,9 +2052,28 @@ class SystemMapCard extends HTMLElement {
         ${tierLabelsSvg}
         ${edgesSvg}
         ${nodesSvg}
-        ${addonGrid.svg}
-        ${entryGrid.svg}
+        ${gridsSvg}
       </svg>`;
+  }
+
+  // Files each integration under the area that holds most of its devices,
+  // with everything unplaced last. Returns [areaName, items] pairs in a
+  // stable order so the map doesn't reshuffle between refreshes.
+  _groupByArea(items) {
+    const areaName = new Map(this._areas.map((a) => [a.area_id, a.name || a.area_id]));
+    const groups = new Map();
+    for (const item of items) {
+      const counts = this._counts.get(`entry:${item.key}`);
+      const best = counts?.areas?.size
+        ? [...counts.areas.entries()].sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])))[0][0]
+        : null;
+      const name = best ? areaName.get(best) || best : "No area";
+      if (!groups.has(name)) groups.set(name, []);
+      groups.get(name).push(item);
+    }
+    return [...groups.entries()].sort(([a], [b]) =>
+      a === "No area" ? 1 : b === "No area" ? -1 : a.localeCompare(b)
+    );
   }
 
   // One auto-laid-out grid section: a bounding box, a label, and a circle
@@ -1140,9 +2103,11 @@ class SystemMapCard extends HTMLElement {
         const key = `${item.kind}:${item.key}`;
         this._nodePositions.set(key, { x, y, r });
         const isHi = !!this._highlight?.has(key);
-        const cls = "smc-node smc-node-small" + (dimming ? (isHi ? " smc-hi" : " smc-dim") : "");
+        const problem = this._problemFor(key);
+        const cls =
+          "smc-node smc-node-small" + (problem ? " smc-problem" : "") + (dimming ? (isHi ? " smc-hi" : " smc-dim") : "");
         return `
-          <g class="${cls}" ${dataAttr}="${escapeHtml(item.key)}">
+          <g class="${cls}" ${dataAttr}="${escapeHtml(item.key)}"><title>${escapeHtml(item.label + (problem ? ` - ${problem.reason}` : ""))}</title>
             <circle cx="${x}" cy="${y}" r="${r}" fill="${item.color}" />
             <text x="${x}" y="${y + 3}">${escapeHtml(truncate(item.label, 15))}</text>
           </g>`;
@@ -1159,6 +2124,7 @@ class SystemMapCard extends HTMLElement {
     // views highlight together, so a finder result is legible either way.
     const wrap = this.querySelector(`[data-list="${kind}"]`);
     const countEl = this.querySelector(`[data-count="${kind}"]`);
+    if (!wrap || !countEl) return; // list switched off in the config
     const all = [...this._entries].sort((a, b) => (a.domain || "").localeCompare(b.domain || ""));
     const shown = this._hideInactive ? all.filter((e) => !isInactiveStatus(entryStatus(e))) : all;
     countEl.textContent = shown.length === all.length ? `(${all.length})` : `(${shown.length} of ${all.length})`;
@@ -1186,33 +2152,44 @@ class SystemMapCard extends HTMLElement {
     }
   }
 
+  // Runs on every hass update (i.e. very often), so it only rewrites the
+  // stat strip - never the graph. Stats with no live state are skipped
+  // rather than shown as a permanent "unavailable"; see HOST_STATS.
   _renderHostStats() {
-    if (!this._hass) return;
-    // Only touches the host node's own text + the detail panel if it's the
-    // one currently open - deliberately not a full _renderGraph() call,
-    // since this runs on every hass update (i.e. very often).
-    const host = HUB_LAYOUT.find((n) => n.id === "host");
-    const cpu = this._hass.states["sensor.processor_use"];
-    const sub = cpu ? `CPU ${cpu.state}%` : "";
-    const subEl = this.querySelector('.smc-node[data-node="host"] .smc-sub');
-    if (subEl) subEl.textContent = sub;
-    else {
-      const g = this.querySelector('.smc-node[data-node="host"]');
-      if (g && sub) {
-        const t = document.createElementNS("http://www.w3.org/2000/svg", "text");
-        t.setAttribute("class", "smc-sub");
-        t.setAttribute("x", host.x);
-        t.setAttribute("y", host.y + 12);
-        t.textContent = sub;
-        g.appendChild(t);
-      }
-    }
+    const el = this.querySelector(".smc-stats");
+    if (!el || !this._hass) return;
+    const tiles = this._hostStats()
+      .map((stat) => {
+        const st = stat.entity ? this._hass.states[stat.entity] : null;
+        if (!st || st.state === "unavailable" || st.state === "unknown") return "";
+        const unit = stat.suffix ?? st.attributes?.unit_of_measurement ?? "";
+        const points = this._config.show_sparklines ? this._history[stat.key] : null;
+        const spark = points
+          ? `<svg viewBox="0 0 100 22" preserveAspectRatio="none"><path d="${sparklinePath(points, 100, 22)}" /></svg>`
+          : "";
+        return `<div class="smc-stat">
+          <div class="smc-stat-label">${escapeHtml(stat.label)}</div>
+          <div class="smc-stat-value">${escapeHtml(st.state)}${escapeHtml(unit)}</div>
+          ${spark}
+        </div>`;
+      })
+      .filter(Boolean);
+    el.hidden = !tiles.length;
+    el.innerHTML = tiles.join("");
   }
 
   // --- detail panel -------------------------------------------------------
 
   async _openDetail(kind, key) {
     this._detailKey = `${kind}:${key}`;
+    // Opening a panel is the one moment its add-on's info and stats are
+    // worth re-reading, so drop the cached copies for whichever add-on this
+    // is - see the note in _refreshData about why they otherwise persist.
+    const slug = kind === "addon" ? key : this._node(key)?.slug;
+    if (slug) {
+      this._addonInfoCache.delete(slug);
+      this._addonStatsCache.delete(slug);
+    }
     await this._renderDetail();
   }
 
@@ -1234,6 +2211,40 @@ class SystemMapCard extends HTMLElement {
       return info;
     } catch (e) {
       return { _error: describeError(e) };
+    }
+  }
+
+  async _fetchAddonStats(slug) {
+    if (this._addonStatsCache.has(slug)) return this._addonStatsCache.get(slug);
+    try {
+      const res = await this._hass.connection.sendMessagePromise({
+        type: "supervisor/api",
+        endpoint: `/addons/${slug}/stats`,
+        method: "get",
+      });
+      const stats = res?.data ?? res;
+      this._addonStatsCache.set(slug, stats);
+      return stats;
+    } catch (e) {
+      return { _error: describeError(e) };
+    }
+  }
+
+  // Never cached: a log tail that doesn't change when you reopen it is
+  // worse than no log at all. Trimmed to the last lines - the endpoint can
+  // return a lot, and this is a glance, not a log viewer.
+  async _fetchAddonLog(slug) {
+    try {
+      const res = await this._hass.connection.sendMessagePromise({
+        type: "supervisor/api",
+        endpoint: `/addons/${slug}/logs`,
+        method: "get",
+      });
+      const text = typeof res === "string" ? res : res?.data ?? "";
+      if (typeof text !== "string" || !text.trim()) return null;
+      return text.trim().split("\n").slice(-25).join("\n");
+    } catch (e) {
+      return `Couldn't read the log: ${describeError(e)}`;
     }
   }
 
@@ -1266,9 +2277,10 @@ class SystemMapCard extends HTMLElement {
     let title = "";
     let role = "";
     let rows = [];
+    let sections = "";
 
     if (kind === "node") {
-      const n = HUB_LAYOUT.find((h) => h.id === key);
+      const n = this._node(key);
       if (!n) return this._closeDetail();
       title = n.label;
       role = ROLES[n.id] || "";
@@ -1277,18 +2289,34 @@ class SystemMapCard extends HTMLElement {
         // has no live state right now (e.g. disabled by the integration) -
         // see the comment on HOST_STATS above for why that's expected for
         // some System Monitor resources on this instance.
-        rows = HOST_STATS.map((s) => {
-          const st = this._hass.states[s.entity];
-          return st ? [s.label, `${st.state}${s.suffix}`] : null;
-        }).filter(Boolean);
+        rows = this._hostStats()
+          .map((s) => {
+            const st = s.entity ? this._hass.states[s.entity] : null;
+            return st ? [s.label, `${st.state}${s.suffix ?? ""}`] : null;
+          })
+          .filter(Boolean);
         if (n.exposedUrl) {
           rows.push(["Exposed via Cloudflare", `<a href="${escapeHtml(n.exposedUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(n.exposedUrl)}</a>`, true]);
         }
+        rows.push(["Hostname", this._system.host?.hostname]);
+        rows.push(["Board", this._system.os?.board]);
+        rows.push(["Machine", this._system.core?.machine || this._system.core?.arch]);
+        rows.push(["Kernel", this._system.host?.kernel]);
+        rows.push(["Operating system", this._system.host?.operating_system]);
       } else if (n.kind === "hardware") {
-        rows = []; // role text above is the whole story - no live API for raw USB info
+        // Discovered, so the detail is the device's own data rather than a
+        // hand-written description - plus whichever add-on's options were
+        // found pointing at it, which is what drew its ownership edge.
+        rows = Object.entries(n.detail || {}).map(([k, v]) => [k, v]);
+        if (n.usedBy?.length) {
+          rows.push(["Claimed by", n.usedBy.map((u) => `${u.name} (${u.option})`).join(", ")]);
+        } else {
+          rows.push(["Claimed by", "no add-on's options reference this device"]);
+        }
       } else if (n.kind === "addon") {
         const info = await this._fetchAddonInfo(n.slug);
         rows = this._addonInfoRows(info, n);
+        sections += await this._addonExtras(n.slug);
       } else if (n.kind === "integration") {
         const entry = this._findEntry(n.domain);
         if (!entry) rows = [["Status", "not configured"]];
@@ -1303,15 +2331,41 @@ class SystemMapCard extends HTMLElement {
     } else if (kind === "addon") {
       const addon = this._findAddon(key);
       title = addon?.name || key;
-      const hub = HUB_LAYOUT.find((n) => n.kind === "addon" && n.slug === key);
+      const hub = this._layout().find((n) => n.kind === "addon" && n.slug === key);
       if (hub) role = ROLES[hub.id] || "";
       const info = await this._fetchAddonInfo(key);
       rows = this._addonInfoRows(info, hub);
+      sections += await this._addonExtras(key);
+    } else if (kind === "status") {
+      const item = this._statusByKey?.get(key);
+      if (!item) return this._closeDetail();
+      title = item.label;
+      rows = [["Value", item.value]];
+      if (item.note) rows.push(["Detail", item.note]);
+      if (key === "updates") rows = this._pendingUpdates().map((u, i) => [i === 0 ? "Pending" : "", u]);
+      if (key === "repairs") {
+        rows = this._issues
+          .filter((i) => !i.ignored)
+          .map((i) => [i.domain, [i.issue_id, i.severity, i.is_fixable ? "fixable" : ""].filter(Boolean).join(" - ")]);
+      }
+      if (key === "backup") {
+        rows = (this._system.backups || [])
+          .slice()
+          .sort((a, b) => (parseDate(b.date) || 0) - (parseDate(a.date) || 0))
+          .slice(0, 8)
+          .map((b) => [b.name || b.slug, `${new Date(parseDate(b.date)).toLocaleString()} - ${formatBytes((b.size || 0) * 1024 * 1024) || ""}`]);
+      }
+      if (key === "internet") {
+        rows = (this._system.network?.interfaces || []).map((i) => [
+          i.interface,
+          [i.type, i.connected ? "connected" : "down", i.primary ? "primary" : "", (i.ipv4?.address || []).join(", ")].filter(Boolean).join(" - "),
+        ]);
+      }
     } else if (kind === "entry") {
       const entry = this._entries.find((e) => e.entry_id === key);
       if (!entry) return this._closeDetail();
       title = entry.title || entry.domain;
-      const hub = HUB_LAYOUT.find((n) => n.kind === "integration" && n.domain === entry.domain);
+      const hub = this._layout().find((n) => n.kind === "integration" && n.domain === entry.domain);
       if (hub) role = ROLES[hub.id] || "";
       rows = [
         ["Domain", entry.domain],
@@ -1320,6 +2374,10 @@ class SystemMapCard extends HTMLElement {
         ["Disabled by", entry.disabled_by || "-"],
       ];
     }
+
+    // Problem / health / area detail applies to whichever node this is, so
+    // it's appended once here rather than in each branch above.
+    sections += this._contextSections(this._detailKey);
 
     el.hidden = false;
     el.innerHTML = `
@@ -1331,15 +2389,129 @@ class SystemMapCard extends HTMLElement {
           .filter(([, v]) => v !== undefined && v !== null && v !== "")
           .map(([k, v, raw]) => `<dt>${escapeHtml(k)}</dt><dd>${raw ? v : escapeHtml(v)}</dd>`)
           .join("")}
-      </dl>`;
+      </dl>
+      ${sections}`;
+  }
+
+  // Live resource use and (optionally) a log tail for one add-on. Both are
+  // fetched on open rather than on load - /stats is per-container and a card
+  // that polled it for thirty add-ons would be its own performance problem.
+  async _addonExtras(slug) {
+    let html = "";
+    if (this._config.show_addon_stats) {
+      const stats = await this._fetchAddonStats(slug);
+      if (stats && !stats._error) {
+        const rows = [
+          ["CPU", stats.cpu_percent != null ? `${Number(stats.cpu_percent).toFixed(1)}%` : null],
+          ["Memory", stats.memory_percent != null ? `${Number(stats.memory_percent).toFixed(1)}% (${formatBytes(stats.memory_usage)} of ${formatBytes(stats.memory_limit)})` : null],
+          ["Network", `${formatBytes(stats.network_rx)} in / ${formatBytes(stats.network_tx)} out`],
+          ["Disk", `${formatBytes(stats.blk_read)} read / ${formatBytes(stats.blk_write)} written`],
+        ].filter(([, v]) => v);
+        if (rows.length) {
+          html += `<div class="smc-detail-section"><h4>Resource use</h4><dl>${rows
+            .map(([k, v]) => `<dt>${escapeHtml(k)}</dt><dd>${escapeHtml(v)}</dd>`)
+            .join("")}</dl></div>`;
+        }
+      }
+    }
+    if (this._config.show_addon_logs) {
+      const log = await this._fetchAddonLog(slug);
+      if (log) html += `<div class="smc-detail-section"><h4>Recent log</h4><pre class="smc-log">${escapeHtml(log)}</pre></div>`;
+    }
+    return html;
+  }
+
+  // Anything the joins know about this node that its own API doesn't:
+  // unavailable entities, open repair issues, System Health's own report,
+  // and which areas its devices live in.
+  _contextSections(detailKey) {
+    let html = "";
+    const rec = this._problems.get(detailKey);
+    const counts = this._counts.get(detailKey);
+
+    if (rec?.unavailable) {
+      const dead = this._entityRegistry
+        .filter((reg) => {
+          if (reg.disabled_by || !this._targetKeys(reg).includes(detailKey)) return false;
+          const st = this._hass?.states?.[reg.entity_id];
+          return !st || st.state === "unavailable" || st.state === "unknown";
+        })
+        .slice(0, 15)
+        .map((reg) => reg.entity_id);
+      html += `<div class="smc-detail-section"><h4>Unavailable entities (${rec.unavailable} of ${rec.entities})</h4><dl>${dead
+        .map((id) => `<dt></dt><dd>${escapeHtml(id)}</dd>`)
+        .join("")}</dl></div>`;
+    }
+    if (rec?.issues?.length) {
+      html += `<div class="smc-detail-section"><h4>Repair issues</h4><dl>${rec.issues
+        .map((i) => `<dt>${escapeHtml(i.severity || "issue")}</dt><dd>${escapeHtml(i.issue_id || i.translation_key || "")}</dd>`)
+        .join("")}</dl></div>`;
+    }
+    if (rec?.health && typeof rec.health === "object") {
+      const rows = Object.entries(rec.health)
+        .map(([k, v]) => [k.replace(/_/g, " "), typeof v === "object" ? v?.value ?? v?.type ?? JSON.stringify(v) : v])
+        .filter(([, v]) => v !== undefined && v !== null && v !== "");
+      if (rows.length) {
+        html += `<div class="smc-detail-section"><h4>System health</h4><dl>${rows
+          .map(([k, v]) => `<dt>${escapeHtml(k)}</dt><dd>${escapeHtml(String(v))}</dd>`)
+          .join("")}</dl></div>`;
+      }
+    }
+    if (counts?.areas?.size) {
+      const names = [...counts.areas.keys()].map((id) => this._areas.find((a) => a.area_id === id)?.name || id);
+      html += `<div class="smc-detail-section"><h4>Areas</h4><dl><dt>${counts.devices.size} devices in</dt><dd>${escapeHtml(names.join(", "))}</dd></dl></div>`;
+    }
+    return html;
+  }
+}
+
+// The visual editor. Deliberately a thin wrapper over <ha-form>: HA already
+// owns the selectors, the theming and the entity pickers, so the whole editor
+// is a schema (EDITOR_SCHEMA) plus the two callbacks ha-form needs. Nothing
+// here duplicates the card's own defaulting - the form emits only the keys
+// the user actually touched, and setConfig fills the rest in.
+class SystemMapCardEditor extends HTMLElement {
+  setConfig(config) {
+    this._config = { ...DEFAULTS, ...config };
+    this._render();
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    if (this._form) this._form.hass = hass;
+  }
+
+  _render() {
+    if (!this._form) {
+      this._form = document.createElement("ha-form");
+      this._form.computeLabel = (schema) => EDITOR_LABELS[schema.name] || schema.name;
+      this._form.addEventListener("value-changed", (ev) => {
+        ev.stopPropagation();
+        this.dispatchEvent(
+          new CustomEvent("config-changed", {
+            detail: { config: { type: "custom:system-map-card", ...ev.detail.value } },
+            bubbles: true,
+            composed: true,
+          })
+        );
+      });
+      this.appendChild(this._form);
+    }
+    this._form.hass = this._hass;
+    this._form.schema = EDITOR_SCHEMA;
+    this._form.data = this._config;
   }
 }
 
 customElements.define("system-map-card", SystemMapCard);
+customElements.define("system-map-card-editor", SystemMapCardEditor);
 
 window.customCards = window.customCards || [];
 window.customCards.push({
   type: "system-map-card",
   name: "System Map",
-  description: "Full topology map with entity finder: hardware, the add-ons using it, network/remote-access entry points, and every other add-on.",
+  description:
+    "Live topology and health map: discovered hardware, the add-ons that own it, network and remote-access entry points, every integration, and an entity finder that says which node serves what.",
+  preview: true,
+  documentationURL: "https://github.com/nict41/HACS-system-map",
 });
