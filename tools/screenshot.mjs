@@ -175,7 +175,7 @@ const page = `<!doctype html><html><head><meta charset="utf-8"><style>
   // user units once both auto-grids are in it, so a short graph area fits it
   // by height and leaves the sides empty. ~1180/0.71 is the height at which
   // it fills the width instead.
-  card.setConfig({ type: "custom:system-map-card", graph_height: 900, refresh_interval: 0 });
+  card.setConfig({ type: "custom:system-map-card", graph_height: 900, refresh_interval: 0, show_debug: true });
   document.getElementById("host").appendChild(card);
   card.hass = hass;
   window.__ready = new Promise((r) => setTimeout(r, 3500));

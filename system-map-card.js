@@ -112,7 +112,7 @@
 // version in the console is always the version of the file that's running -
 // which is the first thing worth knowing when a dashboard misbehaves after
 // an update, and the quickest way to catch a stale browser cache.
-const VERSION = "1.2.0";
+const VERSION = "1.3.0";
 
 console.info(
   `%c SYSTEM-MAP-CARD %c v${VERSION} `,
@@ -311,6 +311,21 @@ function routesFromLog(text) {
   return out;
 }
 
+// Every http(s) endpoint an add-on's log mentions, deduplicated. Used to
+// derive "this add-on talks to that one" where the dependency is announced at
+// runtime rather than written in the options. Deliberately only host:port -
+// no paths, no query strings, nothing that could carry a credential onto the
+// map.
+function servicesFromLog(text) {
+  if (typeof text !== "string") return [];
+  const seen = new Map();
+  for (const match of text.matchAll(/https?:\/\/([a-z0-9.-]+):(\d{2,5})/gi)) {
+    const service = `http://${match[1]}:${match[2]}`;
+    if (!seen.has(service)) seen.set(service, { service, host: match[1], port: parseInt(match[2], 10) });
+  }
+  return [...seen.values()];
+}
+
 // Whose logs are worth reading for routes? An add-on holding a tunnel or
 // proxy credential, since that's exactly the case where the rules live
 // somewhere else and its options can't tell us anything. Keyed on the option
@@ -465,6 +480,8 @@ const DEFAULTS = {
   show_sparklines: true, // host CPU/RAM history strip
   discover_hardware: true, // build the hardware tier from Supervisor's hardware/info
   group_by_area: false,
+  scan_service_logs: false, // read every running add-on's log for services it dials
+  show_debug: false, // the evidence panel: what the card saw, and what it concluded
   tiers: ["hardware", "services", "network", "remote"],
   // Overrides for instances that don't run System Monitor under these names
   cpu_entity: "",
@@ -550,6 +567,8 @@ const EDITOR_SCHEMA = [
           { name: "group_by_area", selector: { boolean: {} } },
           { name: "show_addon_stats", selector: { boolean: {} } },
           { name: "show_addon_logs", selector: { boolean: {} } },
+          { name: "scan_service_logs", selector: { boolean: {} } },
+          { name: "show_debug", selector: { boolean: {} } },
           { name: "hide_inactive", selector: { boolean: {} } },
         ],
       },
@@ -592,6 +611,8 @@ const EDITOR_LABELS = {
   group_by_area: "Group by area",
   show_addon_stats: "Add-on CPU / RAM",
   show_addon_logs: "Add-on log tail",
+  scan_service_logs: "Scan logs for service links (slow)",
+  show_debug: "Show the evidence panel",
   cpu_entity: "CPU",
   ram_entity: "Memory",
   disk_entity: "Disk",
@@ -759,6 +780,9 @@ class SystemMapCard extends HTMLElement {
     this._problems = new Map(); // node key -> {unavailable, total, issues, health}
     this._counts = new Map(); // node key -> {devices, entities, areas}
     this._history = {}; // stat key -> [values] for the sparklines
+    this._logRoutes = []; // ingress rules read out of logs
+    this._logServices = []; // host:port endpoints add-ons named in their logs
+    this._logSizes = new Map(); // slug -> bytes of log read, for the evidence panel
     this._refreshTimer = null;
     this._naturalViewBox = null; // full-fit viewBox, recomputed each render
     // Set of namespaced keys highlighted by the entity finder, or null:
@@ -879,6 +903,7 @@ class SystemMapCard extends HTMLElement {
           <div class="smc-entity-suggestions" hidden></div>
           <div class="smc-entity-result"></div>
         </div>` : ""}
+        ${cfg.show_debug ? `<details class="smc-debug"><summary>Evidence - what the card saw</summary><div class="smc-debug-body"></div></details>` : ""}
         ${cfg.show_integration_list ? `<div class="smc-lists">
           <div class="smc-col">
             <h3>Integrations <span class="smc-count" data-count="integrations"></span> <span class="smc-hint">- every one is also a node on the map above</span></h3>
@@ -970,6 +995,17 @@ class SystemMapCard extends HTMLElement {
         .smc-problem-badge { fill: var(--error-color, #db4437); font-size: 10px; font-weight: 700; text-anchor: middle; }
         .smc-detail-section { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--divider-color, #ddd); }
         .smc-detail-section h4 { margin: 0 0 4px; font-size: 0.85em; font-weight: 600; color: var(--secondary-text-color); }
+        .smc-debug { margin-top: 10px; padding: 8px 12px; border-radius: 8px; background: var(--secondary-background-color, #f2f2f2); font-size: 0.85em; color: var(--primary-text-color); flex: 0 0 auto; }
+        .smc-debug summary { cursor: pointer; font-weight: 500; color: var(--secondary-text-color); }
+        .smc-debug-body { margin-top: 8px; max-height: 420px; overflow: auto; }
+        .smc-debug table { width: 100%; border-collapse: collapse; font-size: 0.92em; }
+        .smc-debug th { text-align: left; font-weight: 500; color: var(--secondary-text-color); padding: 3px 8px 3px 0; vertical-align: top; white-space: nowrap; }
+        .smc-debug td { padding: 3px 8px 3px 0; vertical-align: top; word-break: break-word; }
+        .smc-debug tr + tr td, .smc-debug tr + tr th { border-top: 1px solid var(--divider-color, #ddd); }
+        .smc-debug h4 { margin: 10px 0 4px; font-size: 0.95em; color: var(--primary-text-color); }
+        .smc-debug h4:first-child { margin-top: 0; }
+        .smc-debug code { font-family: var(--code-font-family, monospace); font-size: 0.95em; opacity: 0.9; }
+        .smc-debug .smc-none { color: var(--secondary-text-color); font-style: italic; }
         .smc-log { margin: 0; max-height: 160px; overflow: auto; font-family: var(--code-font-family, monospace); font-size: 0.75em; white-space: pre-wrap; word-break: break-word; background: var(--card-background-color, #fff); border-radius: 6px; padding: 6px 8px; }
       </style>
     `;
@@ -1604,10 +1640,27 @@ class SystemMapCard extends HTMLElement {
       if (!this.isConnected) return;
       const info = this._addonInfoCache.get(addon.slug);
       if (!info || info._error || !looksLikeIngressProvider(info.options)) continue;
-      const log = await this._fetchAddonLog(addon.slug, 400);
+      const log = await this._fetchAddonLog(addon.slug, 0);
+      this._logSizes.set(addon.slug, log ? log.length : 0);
       for (const route of routesFromLog(log)) found.push({ ...route, viaSlug: addon.slug });
     }
     this._logRoutes = found;
+
+    // Optional, and off by default because it means reading every running
+    // add-on's whole log. An add-on logs the services it dials at startup -
+    // Immich announces its machine-learning sidecar as
+    // "became healthy (http://192.168.8.25:3004)" - and that host:port
+    // resolves to another add-on exactly as a tunnel's ingress rule does.
+    if (!this._config.scan_service_logs) return;
+    const dialled = [];
+    for (const addon of this._addons) {
+      if (!this.isConnected) return;
+      if (addon.state !== "started") continue;
+      const log = await this._fetchAddonLog(addon.slug, 0);
+      this._logSizes.set(addon.slug, log ? log.length : 0);
+      for (const target of servicesFromLog(log)) dialled.push({ ...target, fromSlug: addon.slug });
+    }
+    this._logServices = dialled;
   }
 
   // One hour of the two headline stats, downsampled to fit a ~60px sparkline.
@@ -1644,6 +1697,7 @@ class SystemMapCard extends HTMLElement {
     this._renderLegend();
     this._renderGraph();
     this._renderChipList("integrations");
+    this._renderDebug();
     this._renderHostStats();
     this._renderDetail().catch((e) => console.error("system-map-card: detail render failed", e));
     const btn = this.querySelector(".smc-refresh");
@@ -1789,6 +1843,80 @@ class SystemMapCard extends HTMLElement {
         </span>`
       )
       .join("");
+  }
+
+  // The evidence panel. Everything the map claims is inferred from something,
+  // and when an inference is wrong or missing the useful question is "what
+  // did you actually see?" - so this answers it directly, per add-on, rather
+  // than leaving the reasoning implicit in a diagram. It is also the fastest
+  // way to find out that a fact simply isn't in any API: an add-on with no
+  // ports, no matched options and no log evidence has nothing to draw from.
+  _renderDebug() {
+    const el = this.querySelector(".smc-debug-body");
+    if (!el) return;
+
+    const esc = escapeHtml;
+    const none = (text) => `<span class="smc-none">${esc(text)}</span>`;
+    const table = (rows) =>
+      rows.length
+        ? `<table>${rows.map(([k, v]) => `<tr><th>${esc(k)}</th><td>${v}</td></tr>`).join("")}</table>`
+        : none("nothing found");
+
+    const byId = new Map(this._derived.nodes.map((n) => [n.id, n]));
+    const edgesFor = (id) =>
+      this._derived.edges
+        .filter(([from, to]) => from === id || to === id)
+        .map(([from, to, opts]) => `${esc(byId.get(from)?.label || from)} → ${esc(byId.get(to)?.label || to)} <code>${esc(opts?.label || "")}</code>`);
+
+    const addonRows = this._addons.map((addon) => {
+      const info = this._addonInfoCache.get(addon.slug);
+      const node = this._derived.nodes.find((n) => n.slug === addon.slug);
+      const ports = Object.keys(info?.network || {});
+      const roles = node?.roles || [];
+      const facts = [
+        `state <code>${esc(addon.state || "?")}</code>`,
+        ports.length ? `ports <code>${esc(ports.join(", "))}</code>` : "no published ports",
+        roles.length ? `roles <code>${esc(roles.join(", "))}</code>` : null,
+        `tier <code>${esc(node?.tier || "not placed")}</code>`,
+        info ? `options <code>${esc(Object.keys(info.options || {}).join(", ") || "none")}</code>` : "options not read yet",
+        info?.map ? `folders <code>${esc((Array.isArray(info.map) ? info.map : Object.keys(info.map)).join(", "))}</code>` : null,
+        this._logSizes.has(addon.slug) ? `log read (${esc(String(this._logSizes.get(addon.slug)))} bytes)` : "log not read",
+      ].filter(Boolean);
+      const links = node ? edgesFor(node.id) : [];
+      return [
+        addon.name || addon.slug,
+        `${facts.join(" · ")}${links.length ? `<br>${links.join("<br>")}` : `<br>${none("no derived links")}`}`,
+      ];
+    });
+
+    const routeRows = (this._routes || []).map((r) => [
+      r.hostname,
+      `${esc(r.service)} → ${esc(byId.get(r.targetId)?.label || "unresolved")} <code>${esc(r.source)}</code>, via ${esc(r.viaSlug || "?")}`,
+    ]);
+
+    const hardwareRows = this._derived.nodes
+      .filter((n) => n.kind === "hardware")
+      .map((n) => [
+        n.label,
+        `paths <code>${esc((n.paths || []).join(", ") || "none")}</code> · labels <code>${esc((n.labels || []).join(", ") || "none")}</code><br>` +
+          ((n.usedBy || []).length
+            ? n.usedBy.map((u) => `${esc(u.name)} <code>${esc(u.option)}</code>${u.via ? ` (via ${esc(u.via)})` : ""}`).join("<br>")
+            : none("no add-on's options reference it")),
+      ]);
+
+    const dialled = (this._logServices || []).map((d) => [
+      this._addons.find((a) => a.slug === d.fromSlug)?.name || d.fromSlug,
+      `${esc(d.service)} → ${esc(this._resolveService(d.service, this._derived.nodes.filter((n) => n.kind === "addon"))?.id || "unresolved")}`,
+    ]);
+
+    el.innerHTML = `
+      <h4>Add-ons (${this._addons.length})</h4>${table(addonRows)}
+      <h4>Discovered hardware (${hardwareRows.length})</h4>${table(hardwareRows)}
+      <h4>External routes (${routeRows.length})</h4>${table(routeRows)}
+      <h4>Services named in logs (${dialled.length})</h4>${
+        this._config.scan_service_logs ? table(dialled) : none("log scanning is off - enable \"Scan logs for service links\" to fill this in")
+      }
+      <h4>Fetches that failed</h4>${table(Object.entries(this._loadErrors).map(([k, v]) => [k, esc(v)]))}`;
   }
 
   _renderLegend() {
@@ -2109,6 +2237,16 @@ class SystemMapCard extends HTMLElement {
       edges.push([route.viaId, route.targetId, { label: route.hostname, dashed: true }]);
     }
 
+    // An add-on that named another add-on's address in its log depends on
+    // it, whether or not that dependency is written anywhere in its options.
+    for (const dialled of this._logServices || []) {
+      const from = addonNodes.find((n) => n.slug === dialled.fromSlug);
+      const to = this._resolveService(dialled.service, addonNodes);
+      if (!from || !to || to.id === from.id || to.id === "host") continue;
+      if (edges.some(([a, b]) => a === from.id && b === to.id)) continue;
+      edges.push([from.id, to.id, { dashed: true, label: `:${dialled.port} (log)` }]);
+    }
+
     // An integration and the add-on serving its protocol.
     for (const node of nodes.filter((n) => n.kind === "integration")) {
       const port = DOMAIN_SERVICE_PORTS[node.domain];
@@ -2197,9 +2335,33 @@ class SystemMapCard extends HTMLElement {
     // drawn downstream of *it* rather than hanging off the drive - which is
     // what the dependency actually is, and what breaks if that add-on stops.
     const nodeFor = (slug) => addonNodes.find((h) => h.slug === slug);
+    const shares = [];
     for (const n of nodes) {
       const forNode = claims.filter((c) => c.node === n);
       const servers = forNode.filter((c) => servesSmb(c.info));
+
+      // The share itself is a node. Saying "Samba serves NAS1" and "Immich
+      // reads NAS1" as two labels on two edges leaves the reader to join
+      // them up; drawing the share makes the chain - disk, then the add-on
+      // exporting it, then the share, then everything mounting it - the
+      // shape of the picture rather than something to infer from text.
+      for (const server of servers) {
+        const shareNode = {
+          id: `share_${slugify(server.slug)}_${slugify(server.matched)}`,
+          kind: "share",
+          tier: "services",
+          label: `${server.matched} (SMB)`,
+          icon: "folder-network",
+          r: 26,
+          share: server.matched,
+          servedBy: server.slug,
+          notes: [`SMB share exported by ${server.info.name || server.slug} from ${n.label}`],
+        };
+        shares.push(shareNode);
+        const serverNode = nodeFor(server.slug);
+        if (serverNode) edges.push([serverNode.id, shareNode.id, { label: "exports" }]);
+      }
+
       for (const claim of forNode) {
         const isServer = servers.includes(claim);
         const server = isServer ? null : servers.find((sv) => sv.slug !== claim.slug);
@@ -2213,13 +2375,15 @@ class SystemMapCard extends HTMLElement {
 
         const target = nodeFor(claim.slug);
         if (!target) continue;
-        const source = server ? nodeFor(server.slug) : null;
-        if (source) edges.push([source.id, target.id, { dashed: true, label: `SMB: ${server.matched}` }]);
+        const shareNode = server ? shares.find((sh) => sh.servedBy === server.slug && sh.share === server.matched) : null;
+        // A consumer hangs off the share, not the disk: the share is what
+        // breaks when the exporting add-on stops.
+        if (shareNode) edges.push([shareNode.id, target.id, { dashed: true, label: `mounts (${claim.option})` }]);
         else edges.push([n.id, target.id, { label: `${isServer ? "serves" : "owns"} (${claim.option})` }]);
       }
     }
 
-    return { nodes, edges };
+    return { nodes: [...nodes, ...shares], edges };
   }
 
   // Resolves an entity registry entry to node key(s) once per
@@ -2336,6 +2500,12 @@ class SystemMapCard extends HTMLElement {
     let sub = "";
     if (n.kind === "host") status = "host";
     else if (n.kind === "hardware") status = "hardware";
+    else if (n.kind === "share") {
+      // A share is only up while the add-on exporting it is, so it takes
+      // that add-on's state rather than looking permanently unknown.
+      status = addonStatus(this._findAddon(n.servedBy));
+      sub = `served by ${this._findAddon(n.servedBy)?.name || n.servedBy}`;
+    }
     else if (n.kind === "addon") {
       const addon = this._findAddon(n.slug);
       status = addonStatus(addon);
@@ -2782,6 +2952,12 @@ class SystemMapCard extends HTMLElement {
   // Never cached: a log tail that doesn't change when you reopen it is
   // worse than no log at all. Trimmed to the last lines - the endpoint can
   // return a lot, and this is a glance, not a log viewer.
+  // `lines` trims the tail for *display* only. Pass 0 to get the whole log:
+  // the facts worth deriving are logged once at startup - a tunnel's ingress
+  // rules, the services an add-on connects to - so a tail loses them on
+  // anything that has been running a while and chattering since. Reading
+  // routes out of the last 400 lines is exactly why the public URLs
+  // disappeared after the map became derived.
   async _fetchAddonLog(slug, lines = 25) {
     try {
       const res = await this._hass.connection.sendMessagePromise({
@@ -2791,7 +2967,8 @@ class SystemMapCard extends HTMLElement {
       });
       const text = typeof res === "string" ? res : res?.data ?? "";
       if (typeof text !== "string" || !text.trim()) return null;
-      return text.trim().split("\n").slice(-lines).join("\n");
+      const trimmed = text.trim();
+      return lines > 0 ? trimmed.split("\n").slice(-lines).join("\n") : trimmed;
     } catch (e) {
       return `Couldn't read the log: ${describeError(e)}`;
     }

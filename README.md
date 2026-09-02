@@ -62,6 +62,9 @@ a count.
   - **Public URLs** from the tunnel add-on that routes them, read from its
     options, or from its log when the tunnel is managed remotely and the
     rules never touch disk
+  - **Exported shares as nodes**: disk → the add-on exporting it → the share
+    → everything mounting it, so the chain is visible rather than implied by
+    edge labels
   - **Routers** from integrations reporting `device_tracker` entities with
     `source_type: router`
   - **Positions** by a barycentre pass that keeps connected nodes near each
@@ -101,6 +104,8 @@ editor (three-dot menu on the card -> Edit).
 | `group_by_area` | `false` | Split the integrations grid by area |
 | `show_addon_stats` | `true` | Live CPU/RAM in the detail panel |
 | `show_addon_logs` | `false` | Log tail in the detail panel (see note below) |
+| `scan_service_logs` | `false` | Read every running add-on's log for services it dials |
+| `show_debug` | `false` | Evidence panel: what the card saw and concluded |
 | `cpu_entity` etc. | auto | Override the host-stat entities |
 
 ```yaml
@@ -109,6 +114,15 @@ title: System Map
 graph_height: 600
 group_by_area: true
 ```
+
+### When the map is missing something
+
+Turn on **Show the evidence panel** in the visual editor. It lists, per
+add-on, the ports it publishes, the roles and tier derived from them, its
+option keys, whether its log was read and every edge derived for it - plus
+the external routes and what each resolved to. If an add-on shows no ports,
+no matched options and no log evidence, the information genuinely isn't in
+any API the card can reach, and no amount of configuration will surface it.
 
 ### A note on `show_addon_logs`
 

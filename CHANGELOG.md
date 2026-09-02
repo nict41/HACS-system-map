@@ -8,6 +8,40 @@ was already there in a way an existing dashboard would notice.
 `VERSION` in `system-map-card.js` is the source of truth and CI refuses to
 publish a release whose tag doesn't match it.
 
+## [1.3.0] - 2026-09-02
+
+### Added
+
+- **The exported share is a node.** Saying "Samba serves NAS1" and "Immich
+  reads NAS1" as two edge labels left the reader to join them up. The share
+  is now drawn, so the chain is the shape of the picture: disk →
+  `serves (moredisks)` → the add-on exporting it → `exports` → **NAS1 (SMB)**
+  → `mounts (external_library)` → each consumer. A share takes the state of
+  the add-on exporting it, so it goes grey when that add-on stops.
+- **An evidence panel** (`show_debug`), listing what the card actually saw
+  and what it concluded: per add-on its state, published ports, derived
+  roles and tier, option keys, folder mappings, whether its log was read, and
+  every edge derived for it - plus the external routes with what each
+  resolved to, the discovered hardware with its paths and labels, and the
+  fetches that failed. Everything the map claims is inferred from something,
+  and this is where to look when an inference is wrong or missing.
+- **Service links from logs** (`scan_service_logs`, off by default). An
+  add-on often announces what it depends on at runtime rather than in its
+  options - Immich reports its machine-learning sidecar as "became healthy
+  (http://192.168.8.25:3004)" - and that host:port resolves to another add-on
+  exactly as a tunnel's ingress rule does. Off by default because it means
+  reading every running add-on's whole log. Only the host and port are ever
+  taken from a log line, and a URL carrying credentials is skipped outright
+  rather than stripped.
+
+### Fixed
+
+- **Public URLs disappeared.** Routes were parsed from the last 400 lines of
+  a tunnel add-on's log, but the ingress rules are logged once at startup -
+  so on a tunnel that had been up a while and chattering since, the line had
+  scrolled out of the window and every route was lost. Logs are now parsed in
+  full; the tail limit applies only to the log shown in the detail panel.
+
 ## [1.2.0] - 2026-09-02
 
 ### Changed

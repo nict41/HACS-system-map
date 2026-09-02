@@ -171,10 +171,31 @@ T("a disk referenced by filesystem label, not path, is still matched",
   drive().usedBy.find((u) => u.slug === "c9a35110_sambanas")?.option, "moredisks");
 T("the SMB server owns the drive",
   edgeLabels(drive().id, addonId("c9a35110_sambanas")), ["serves (moredisks)"]);
+// The share is a node of its own, so the chain reads disk -> exporter ->
+// share -> consumers rather than being implied by two edge labels.
+const shareNode = () => c._derived.nodes.find((n) => n.kind === "share");
+T("the exported share becomes a node",
+  [shareNode()?.label, shareNode()?.tier, shareNode()?.servedBy],
+  ["NAS1 (SMB)", "services", "c9a35110_sambanas"]);
+T("the exporting add-on is edged to the share it exports",
+  edgeLabels(addonId("c9a35110_sambanas"), shareNode().id), ["exports"]);
 T("consumers hang off the share, not the hardware",
-  [edgeLabels(drive().id, addonId("3b88f413_immich")), edgeLabels(addonId("c9a35110_sambanas"), addonId("3b88f413_immich"))], [[], ["SMB: NAS1"]]);
+  [edgeLabels(drive().id, addonId("3b88f413_immich")), edgeLabels(shareNode().id, addonId("3b88f413_immich"))],
+  [[], ["mounts (external_library)"]]);
 T("a consumer referencing the bare label resolves the same way",
-  edgeLabels(addonId("c9a35110_sambanas"), addonId("beb500c8_kiwix")), ["SMB: NAS1"]);
+  edgeLabels(shareNode().id, addonId("beb500c8_kiwix")), ["mounts (zim_dir)"]);
+T("a share takes the state of the add-on exporting it",
+  (() => {
+    const state = (addonState) => {
+      const card = newCard();
+      card._addons.find((a) => a.slug === "c9a35110_sambanas").state = addonState;
+      card._derive();
+      return card._nodeState(card._derived.nodes.find((n) => n.kind === "share")).status;
+    };
+    return [state("started"), state("stopped")];
+  })(), ["started", "stopped"]);
+T("only one share node per exported share",
+  c._derived.nodes.filter((n) => n.kind === "share").length, 1);
 T("the drive detail separates who mounts it from who reaches it over SMB",
   drive().usedBy.map((u) => [u.name, u.via, u.share]),
   [["Samba NAS", null, null], ["Immich", "Samba NAS", "NAS1"], ["Kiwix", "Samba NAS", "NAS1"]]);
@@ -345,6 +366,71 @@ T("add-ons placed in a tier are not repeated in the leftovers grid",
     c._renderGraph();
     return c._addons.every((a) => !c._nodePositions.has(`addon:${a.slug}`));
   })(), true);
+
+// --- reading services out of a log -----------------------------------------
+// Immich announces its machine-learning sidecar at runtime rather than in its
+// options: "Machine learning server became healthy (http://192.168.8.25:3004)".
+const IMMICH_LOG = [
+  "[Nest] LOG [Api:Bootstrap] Immich Server is listening on http://127.0.0.1:2283 [v3.1.0] [production]",
+  "[Nest] LOG [Api:MachineLearningRepository] Machine learning server became healthy (http://192.168.8.25:3004).",
+  "[Nest] LOG [Microservices:MachineLearningRepository] Machine learning server became healthy (http://192.168.8.25:3004).",
+  '[Nest] LOG [Api:StorageService] Verifying system mount folder checks: {"mountChecks":{"library":true}}',
+].join("\n");
+
+T("host:port endpoints are read out of a log and deduplicated",
+  ctx.servicesFromLog(IMMICH_LOG).map((d) => d.service),
+  ["http://127.0.0.1:2283", "http://192.168.8.25:3004"]);
+// A URL carrying credentials is skipped outright rather than stripped: the
+// map is not worth the risk of rendering a secret someone logged.
+T("a URL with embedded credentials is ignored entirely",
+  ctx.servicesFromLog("connecting to https://user:secret@example.com:8443/private?token=abc"), []);
+T("only the host and port survive - never a path or query",
+  ctx.servicesFromLog("GET http://example.com:8443/private?token=abc").map((d) => d.service),
+  ["http://example.com:8443"]);
+T("a log with no endpoints yields nothing", ctx.servicesFromLog("nothing here"), []);
+
+T("an endpoint named in a log becomes an edge to the add-on serving that port",
+  (() => {
+    const dial = newCard({ scan_service_logs: true });
+    dial._addons.push({ slug: "beb500c8_immich_ml", name: "Immich ML", state: "started" });
+    dial._addonInfoCache.set("beb500c8_immich_ml", { name: "Immich ML", network: { "3003/tcp": 3004 }, options: {} });
+    dial._logServices = [{ service: "http://192.168.8.25:3004", host: "192.168.8.25", port: 3004, fromSlug: "3b88f413_immich" }];
+    dial._derive();
+    return dial._derived.edges
+      .filter((e) => e[0] === addonId("3b88f413_immich") && e[1] === addonId("beb500c8_immich_ml"))
+      .map((e) => e[2].label);
+  })(), [":3004 (log)"]);
+T("an endpoint that resolves to the host itself is not drawn",
+  (() => {
+    const dial = newCard({ scan_service_logs: true });
+    dial._logServices = [{ service: "http://192.168.8.25:8123", host: "192.168.8.25", port: 8123, fromSlug: "3b88f413_immich" }];
+    dial._derive();
+    return dial._derived.edges.some((e) => e[0] === addonId("3b88f413_immich") && e[1] === "host");
+  })(), false);
+
+// --- the evidence panel ----------------------------------------------------
+T("the evidence panel reports what was seen per add-on",
+  (() => {
+    const dbg = newCard({ show_debug: true });
+    const body = makeEl();
+    const outer = dbg.querySelector;
+    dbg.querySelector = (sel) => (sel === ".smc-debug-body" ? body : outer(sel));
+    dbg._renderDebug();
+    return [
+      body.innerHTML.includes("Samba NAS"),
+      body.innerHTML.includes("445/tcp"),
+      body.innerHTML.includes("SMB file server"),
+      body.innerHTML.includes("ha.example.com"),
+      body.innerHTML.includes("moredisks"),
+    ];
+  })(), [true, true, true, true, true]);
+T("the evidence panel is absent unless asked for",
+  (() => {
+    const off = newCard();
+    let threw = false;
+    try { off._renderDebug(); } catch (e) { threw = true; }
+    return threw;
+  })(), false);
 
 // --- problem join ----------------------------------------------------------
 // The mqtt entities resolve to whichever add-on publishes 1883 - derived
