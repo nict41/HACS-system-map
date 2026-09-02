@@ -8,6 +8,27 @@ was already there in a way an existing dashboard would notice.
 `VERSION` in `system-map-card.js` is the source of truth and CI refuses to
 publish a release whose tag doesn't match it.
 
+## [1.6.1] - 2026-09-02
+
+### Fixed
+
+The LAN address was generic already - every add-on publishing a port got
+one - but three nodes fell through it, which made it look like a feature
+built for one add-on:
+
+- **Home Assistant itself** showed only its public hostname, never its LAN
+  address. It is reachable on the network like anything else, and now says
+  so.
+- **A host-networked SMB server showed nothing at all.** It publishes no
+  visible port, so there was no address to show - but a recognised protocol
+  implies its own port, and SMB is 445 wherever it runs. Any add-on whose
+  role is known now falls back to that role's port.
+- **The share node** named the add-on serving it but not where to reach it.
+  It now shows the address you would actually type, `\\192.168.8.25\NAS1`.
+
+Both rules are now asserted over every node rather than for a named add-on,
+since "it works for Immich" was true the whole time these three were blank.
+
 ## [1.6.0] - 2026-09-02
 
 ### Added

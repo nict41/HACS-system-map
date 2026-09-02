@@ -512,6 +512,33 @@ T("an exposed service shows its LAN address and its public hostname",
     const node = c._node(addonId("3b88f413_immich"));
     return [node.badge, c._nodeState(node).subs];
   })(), ["nas.example.com", ["192.168.8.25:8080", "nas.example.com"]]);
+// Asserted as a rule over every node rather than for one add-on, because
+// "it works for Immich" was true while the host, a host-networked Samba and
+// the share itself all showed nothing.
+T("every node with a resolved route shows that hostname",
+  c._derived.nodes
+    .filter((n) => n.hostname)
+    .filter((n) => !c._nodeState(n).subs.includes(n.hostname))
+    .map((n) => n.label), []);
+T("every node we know an address for shows it",
+  c._derived.nodes
+    .filter((n) => n.lan)
+    .filter((n) => !c._nodeState(n).subs.includes(n.lan))
+    .map((n) => n.label), []);
+T("Home Assistant shows its own LAN address, not only its public name",
+  c._nodeState(c._node("host")).subs, ["192.168.8.25:8123", "ha.example.com"]);
+T("a host-networked SMB server still gets an address, from the protocol",
+  (() => {
+    const hostNet = newCard();
+    hostNet._addonInfoCache.set("c9a35110_sambanas", {
+      name: "Samba NAS", network: null, options: { workgroup: "WG", moredisks: ["NAS1"] },
+    });
+    hostNet._derive();
+    return hostNet._nodeState(hostNet._node(addonId("c9a35110_sambanas"))).subs;
+  })(), ["192.168.8.25:445"]);
+T("a share shows the address you would actually type",
+  c._nodeState(c._derived.nodes.find((n) => n.kind === "share")).subs, ["\\\\192.168.8.25\\NAS1"]);
+
 T("a LAN-only service shows just its address",
   c._nodeState(c._node(addonId("core_mosquitto"))).subs.includes("192.168.8.25:1883"), true);
 T("a service with no reachable port shows neither",

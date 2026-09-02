@@ -112,7 +112,7 @@
 // version in the console is always the version of the file that's running -
 // which is the first thing worth knowing when a dashboard misbehaves after
 // an update, and the quickest way to catch a stale browser cache.
-const VERSION = "1.6.0";
+const VERSION = "1.6.1";
 
 console.info(
   `%c SYSTEM-MAP-CARD %c v${VERSION} `,
@@ -2174,6 +2174,9 @@ class SystemMapCard extends HTMLElement {
       exposedUrl: external ? `https://${external.hostname}` : null,
       hostname: external?.hostname || null,
       badge: external?.hostname || null,
+      // Home Assistant is reachable on the LAN like anything else, and was
+      // the one node that only ever showed its public name.
+      lan: `${this._primaryAddress() || ""}:${Number(this._system.core?.port) || 8123}`,
       notes: [
         this._system.core?.version ? `Home Assistant Core ${this._system.core.version}` : null,
         this._system.os?.board ? `on ${this._system.os.board}` : null,
@@ -2189,10 +2192,13 @@ class SystemMapCard extends HTMLElement {
       const info = this._addonInfoCache.get(addon.slug);
       const ports = [...hostPortsFor(info), ...Object.keys(info?.network || {}).map((p) => parseInt(p, 10))];
       const roles = PORT_ROLES.filter((r) => ports.includes(r.port));
-      if (!roles.length && servesSmb(info)) roles.push({ role: "SMB file server" });
+      if (!roles.length && servesSmb(info)) roles.push({ role: "SMB file server", port: 445 });
       const tier = roles.find((r) => r.tier)?.tier || "services";
       // The lowest port an add-on answers on is the one a person would type.
-      const lanPort = [...hostPortsFor(info)].sort((a, b) => a - b)[0];
+      // Failing that, a recognised protocol implies its own port: a
+      // host-networked Samba publishes nothing visible, but SMB is 445
+      // wherever it runs, and an address is more use than a blank line.
+      const lanPort = [...hostPortsFor(info)].sort((a, b) => a - b)[0] || roles.find((r) => r.port)?.port;
       const address = this._primaryAddress();
       return {
         lan: lanPort ? `${address ? `${address}:` : ":"}${lanPort}` : null,
@@ -2524,6 +2530,7 @@ class SystemMapCard extends HTMLElement {
           r: 26,
           share: server.matched,
           servedBy: server.slug,
+          lan: `\\\\${this._primaryAddress() || "host"}\\${server.matched}`,
           notes: [`SMB share exported by ${server.info.name || server.slug} from ${n.label}`],
         };
         shares.push(shareNode);
