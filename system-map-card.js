@@ -116,7 +116,7 @@
 // version in the console is always the version of the file that's running -
 // which is the first thing worth knowing when a dashboard misbehaves after
 // an update, and the quickest way to catch a stale browser cache.
-const VERSION = "1.1.0";
+const VERSION = "1.1.1";
 
 console.info(
   `%c SYSTEM-MAP-CARD %c v${VERSION} `,
@@ -374,6 +374,11 @@ const GRID_START_Y = 1180; // first auto-grid sits below the curated layout
 // Hardware row geometry. The host occupies slot 0; discovered devices fill
 // the rest of the row and wrap, and everything below the hardware tier is
 // pushed down by however many extra rows that takes (see _layout).
+// Everything here comes from the Supervisor, which a Container or Core
+// install doesn't have. Their failures are one fact, not eight, and are
+// reported as one - see _renderErrors.
+const SUPERVISOR_KEYS = new Set(["addons", "host", "core", "os", "supervisor", "network", "backups", "hardware"]);
+
 const HW_PER_ROW = 7;
 const HW_ROW_H = 130;
 const HW_MARGIN_X = 90;
@@ -1708,15 +1713,30 @@ class SystemMapCard extends HTMLElement {
 
   _renderErrors() {
     const el = this.querySelector(".smc-errors");
-    const msgs = Object.entries(this._loadErrors)
-      .filter(([, v]) => v)
-      .map(([k, v]) => `${k}: ${escapeHtml(v)}`);
+    const failed = Object.entries(this._loadErrors).filter(([, v]) => v);
+
+    // On a Container or Core install every Supervisor endpoint fails at once,
+    // and eight near-identical "not found" messages in a red bar reads like
+    // the card is broken when it isn't - most of it works fine without the
+    // Supervisor. Say the one true thing instead, and keep listing anything
+    // else individually, since those are real faults worth the detail.
+    const supervisor = failed.filter(([k]) => SUPERVISOR_KEYS.has(k));
+    const others = failed.filter(([k]) => !SUPERVISOR_KEYS.has(k));
+    const msgs = others.map(([k, v]) => `${k}: ${escapeHtml(v)}`);
+    if (supervisor.length >= 3) {
+      msgs.unshift(
+        `Supervisor API unavailable (${supervisor.length} endpoints) - the status bar, host stats, discovered hardware and add-on data need a Home Assistant OS or Supervised install. Everything else on this card works without it.`
+      );
+    } else {
+      msgs.unshift(...supervisor.map(([k, v]) => `${k}: ${escapeHtml(v)}`));
+    }
+
     if (!msgs.length) {
       el.hidden = true;
       return;
     }
     el.hidden = false;
-    el.innerHTML = "Some data failed to load - " + msgs.join(" · ");
+    el.innerHTML = (msgs.length === 1 ? "" : "Some data failed to load - ") + msgs.join(" · ");
   }
 
   _findAddon(slug) {

@@ -25,6 +25,13 @@ jobs:
 
   hacs:
     runs-on: ubuntu-latest
+    # Advisory, not blocking. These checks are the entry requirements for the
+    # HACS *default store*; none of them affect installing this repo as a
+    # custom repository, which is how it's used today. Its findings still show
+    # in the log. Outstanding at the time of writing: the repository needs at
+    # least one GitHub topic (Settings -> About -> Topics). Once that's set,
+    # delete this line and let the check gate the build properly.
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: hacs/action@main

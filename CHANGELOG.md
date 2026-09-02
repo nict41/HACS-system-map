@@ -8,6 +8,28 @@ was already there in a way an existing dashboard would notice.
 `VERSION` in `system-map-card.js` is the source of truth and CI refuses to
 publish a release whose tag doesn't match it.
 
+## [1.1.1] - 2026-09-02
+
+### Added
+
+- MIT `LICENSE`, which HACS validation requires.
+
+### Fixed
+
+- A Container or Core install has no Supervisor, so all eight Supervisor
+  endpoints fail at once and the error strip filled with near-identical "not
+  found" messages - which reads like the card is broken when most of it works
+  fine without them. Three or more Supervisor failures now collapse to one
+  line naming what needs HA OS/Supervised; anything else is still listed
+  individually, since those are real faults worth the detail.
+
+### Changed
+
+- The `hacs/action` job in CI is advisory rather than blocking. Its remaining
+  findings are entry requirements for the HACS *default store* and don't
+  affect installing this repo as a custom repository. See the comment in
+  `.github/workflows/validate.yml` for what's outstanding.
+
 ## [1.1.0] - 2026-09-02
 
 ### Added

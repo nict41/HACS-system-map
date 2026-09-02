@@ -331,6 +331,27 @@ T("findDeviceInOptions reports the option key and what it matched",
   ctx.findDeviceInOptions({ serial: { port: "/dev/ttyUSB0" } }, { paths: ["/dev/ttyUSB0"], labels: [] }),
   { option: "serial.port", matched: "/dev/ttyUSB0" });
 
+// --- error reporting -------------------------------------------------------
+// A Container or Core install has no Supervisor, so every one of those
+// endpoints fails at once. Eight near-identical messages in a red bar reads
+// like the card is broken when most of it works fine.
+const errorsFor = (loadErrors) => {
+  const card = newCard();
+  const el = makeEl();
+  card.querySelector = (sel) => (sel === ".smc-errors" ? el : makeEl());
+  card._loadErrors = loadErrors;
+  card._renderErrors();
+  return el.hidden ? null : el.innerHTML;
+};
+T("no errors hides the strip", errorsFor({}), null);
+T("a whole missing Supervisor is reported as one fact",
+  errorsFor({ addons: "not found", host: "not found", core: "not found", os: "not found", supervisor: "not found", network: "not found", backups: "not found", hardware: "not found" }),
+  "Supervisor API unavailable (8 endpoints) - the status bar, host stats, discovered hardware and add-on data need a Home Assistant OS or Supervised install. Everything else on this card works without it.");
+T("one or two Supervisor failures are still reported individually",
+  errorsFor({ backups: "timeout" }), "backups: timeout");
+T("non-Supervisor failures keep their detail alongside",
+  errorsFor({ addons: "x", host: "x", core: "x", entries: "websocket closed" }).includes("entries: websocket closed"), true);
+
 // --- config changes apply live ---------------------------------------------
 // Regression: every option inside a *named* ha-form expandable was written to
 // config.<section>.<option>, which setConfig never reads - the form worked
