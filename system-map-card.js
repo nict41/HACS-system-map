@@ -112,7 +112,7 @@
 // version in the console is always the version of the file that's running -
 // which is the first thing worth knowing when a dashboard misbehaves after
 // an update, and the quickest way to catch a stale browser cache.
-const VERSION = "1.4.0";
+const VERSION = "1.5.0";
 
 console.info(
   `%c SYSTEM-MAP-CARD %c v${VERSION} `,
@@ -715,9 +715,42 @@ function matchDeviceValue(value, device) {
 // An add-on publishing SMB is a file server, whatever it's called. Read off
 // its own published ports rather than its slug, so this holds for any Samba
 // add-on rather than the one this map was written against.
-const SMB_PORTS = ["445/tcp", "139/tcp"];
+// Every port an add-on can be reached on from the host. `network` alone is
+// not enough: an add-on running with host networking publishes nothing
+// through it (the field is null), which is exactly the case for the common
+// Samba and media add-ons - so their ports were invisible, no share was
+// detected, and every tunnel rule pointing at one of their ports failed to
+// resolve. The web-UI template carries the port in that case.
+function hostPortsFor(info) {
+  const ports = new Set();
+  for (const value of Object.values(info?.network || {})) {
+    if (typeof value === "number" && value > 0) ports.add(value);
+  }
+  const webui = String(info?.webui || "");
+  // `[PORT:3001]` names a *container* port, which is the host port only when
+  // there is no mapping to look it up in. Handled first, then stripped, so
+  // the literal scan below can't read the same digits a second time.
+  for (const match of webui.matchAll(/\[PORT:(\d{2,5})\]/g)) {
+    const container = parseInt(match[1], 10);
+    const mapped = info?.network?.[`${container}/tcp`];
+    ports.add(typeof mapped === "number" && mapped > 0 ? mapped : container);
+  }
+  for (const match of webui.replace(/\[PORT:\d+\]/g, "").matchAll(/:(\d{2,5})\b/g)) {
+    ports.add(parseInt(match[1], 10));
+  }
+  if (typeof info?.ingress_port === "number" && info.ingress_port > 0) ports.add(info.ingress_port);
+  return ports;
+}
+
+const SMB_PORTS = [445, 139];
+// An SMB server either publishes the ports, or - when it runs on the host
+// network and so publishes nothing visible - declares SMB's own settings in
+// its options. `workgroup` is a Samba concept and nothing else's, which makes
+// it evidence rather than a guess at the add-on's name.
 function servesSmb(info) {
-  return !!info?.network && Object.keys(info.network).some((port) => SMB_PORTS.includes(port));
+  const ports = hostPortsFor(info);
+  if (SMB_PORTS.some((port) => ports.has(port))) return true;
+  return Object.keys(info?.options || {}).some((key) => /^workgroup$|smb|samba/i.test(key));
 }
 
 // Sparkline over a fixed box, normalised to its own min/max - these sit next
@@ -1631,7 +1664,11 @@ class SystemMapCard extends HTMLElement {
     this._derive();
     this._buildProblemIndex();
     this._buildCounts();
-    if (!this._detailKey) this._renderGraph();
+    // Everything, not just the graph. Add-on options and tunnel routes arrive
+    // after the first paint, and they feed the status bar too - redrawing
+    // only the graph left the Exposed pill permanently absent, because it is
+    // built from routes that did not exist at first render.
+    this._renderAll();
   }
 
   // Reads the log of any add-on holding a tunnel or proxy credential. That is
@@ -2124,8 +2161,9 @@ class SystemMapCard extends HTMLElement {
   _deriveAddonNodes() {
     return this._addons.map((addon) => {
       const info = this._addonInfoCache.get(addon.slug);
-      const ports = Object.keys(info?.network || {}).map((p) => parseInt(p, 10));
+      const ports = [...hostPortsFor(info), ...Object.keys(info?.network || {}).map((p) => parseInt(p, 10))];
       const roles = PORT_ROLES.filter((r) => ports.includes(r.port));
+      if (!roles.length && servesSmb(info)) roles.push({ role: "SMB file server" });
       const tier = roles.find((r) => r.tier)?.tier || "services";
       return {
         id: `addon_${slugify(addon.slug)}`,
@@ -2190,8 +2228,15 @@ class SystemMapCard extends HTMLElement {
     }
     // An add-on that publishes hostnames for other things is a way in, not a
     // service - that's what makes it "remote access" without knowing its name.
+    // Its own hostnames go on it, so "what is exposed, and through what" is
+    // answerable from the map even when a rule can't be attributed to the
+    // add-on behind it.
     for (const node of addonNodes) {
-      if (routes.some((r) => r.viaId === node.id)) node.tier = "remote";
+      const mine = routes.filter((r) => r.viaId === node.id);
+      if (!mine.length) continue;
+      node.tier = "remote";
+      node.routes = mine;
+      node.notes.push(...mine.map((r) => `${r.hostname} → ${r.service}`));
     }
     return routes;
   }
@@ -2209,12 +2254,20 @@ class SystemMapCard extends HTMLElement {
     const byName = addonNodes.find((n) => addonIdentifiers(n.slug).some((id) => id.toLowerCase() === host.toLowerCase()));
     if (byName) return byName;
 
+    // A rule can also point straight at an add-on's own container address.
+    const byIp = addonNodes.find((n) => this._addonInfoCache.get(n.slug)?.ip_address === host);
+    if (byIp) return byIp;
+
     if (!this._localHosts().has(host.toLowerCase()) || !port) return null;
-    const byPort = addonNodes.find((n) => {
-      const info = this._addonInfoCache.get(n.slug);
-      return Object.values(info?.network || {}).some((hostPort) => hostPort === port);
-    });
-    return byPort || { id: "host" }; // 8123 and anything else local is the host
+    const byPort = addonNodes.find((n) => hostPortsFor(this._addonInfoCache.get(n.slug)).has(port));
+    if (byPort) return byPort;
+
+    // Only Home Assistant's own port is Home Assistant. Treating every
+    // unresolved local rule as the host was worse than leaving it unresolved:
+    // it quietly attributed someone else's subdomain to Home Assistant and
+    // left the add-on actually serving it with no hostname at all.
+    const corePort = Number(this._system.core?.port) || 8123;
+    return port === corePort ? { id: "host" } : null;
   }
 
   // Positions, computed rather than authored. Tiers stack down the page in
@@ -2620,6 +2673,10 @@ class SystemMapCard extends HTMLElement {
     // A public hostname is the single most useful thing to know about a node
     // at a glance, so it outranks the counts.
     if (n.hostname) sub = n.hostname;
+    if (n.routes?.length) {
+      const unresolved = n.routes.filter((r) => !r.targetId).length;
+      sub = `${n.routes.length} hostname${n.routes.length === 1 ? "" : "s"}${unresolved ? ` · ${unresolved} unmatched` : ""}`;
+    }
 
     // A problem outranks whatever the sub-label was going to say - the whole
     // point of the join is that it's visible without clicking.
@@ -3135,6 +3192,17 @@ class SystemMapCard extends HTMLElement {
       } else if (n.kind === "addon") {
         const info = await this._fetchAddonInfo(n.slug);
         rows = this._addonInfoRows(info, n);
+        if (n.routes?.length) {
+          sections += `<div class="smc-detail-section"><h4>Published hostnames (${n.routes.length})</h4><dl>${n.routes
+            .map(
+              (r) =>
+                `<dt><a href="https://${escapeHtml(r.hostname)}" target="_blank" rel="noopener noreferrer">${escapeHtml(r.hostname)}</a></dt>` +
+                `<dd>${escapeHtml(r.service)} → ${escapeHtml(
+                  this._derived.nodes.find((x) => x.id === r.targetId)?.label || "not matched to an add-on"
+                )}</dd>`
+            )
+            .join("")}</dl></div>`;
+        }
         sections += await this._addonExtras(n.slug);
       } else if (n.kind === "integration") {
         const entry = this._findEntry(n.domain);

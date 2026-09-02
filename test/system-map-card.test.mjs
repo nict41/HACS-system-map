@@ -367,6 +367,74 @@ T("add-ons placed in a tier are not repeated in the leftovers grid",
     return c._addons.every((a) => !c._nodePositions.has(`addon:${a.slug}`));
   })(), true);
 
+// --- host networking -------------------------------------------------------
+// An add-on running on the host network publishes nothing through `network`
+// (the field is null). That is the normal case for Samba and for several
+// media add-ons, and it silently broke both the share detection and every
+// tunnel rule pointing at one of their ports.
+T("ports are found in a web-UI template when there is no port mapping",
+  [...ctx.hostPortsFor({ network: null, webui: "http://[HOST]:8080/" })], [8080]);
+T("a container port in a template resolves through the mapping when there is one",
+  [...ctx.hostPortsFor({ network: { "3001/tcp": 8080 }, webui: "http://[HOST]:[PORT:3001]/" })], [8080]);
+T("and is taken literally when there is not",
+  [...ctx.hostPortsFor({ network: null, webui: "http://[HOST]:[PORT:3001]/" })], [3001]);
+T("an ingress port counts as reachable",
+  [...ctx.hostPortsFor({ ingress_port: 8099 })], [8099]);
+T("no evidence at all means no ports, not a guess",
+  [...ctx.hostPortsFor({ network: null })], []);
+
+T("a host-networked Samba is still recognised as an SMB server",
+  [
+    ctx.servesSmb({ network: null, options: { workgroup: "WORKGROUP", moredisks: ["NAS1"] } }),
+    ctx.servesSmb({ network: { "445/tcp": 445 }, options: {} }),
+    ctx.servesSmb({ network: null, options: { workgroup_size: 4 } }),
+    ctx.servesSmb({ network: null, options: { zim_dir: "NAS1" } }),
+  ], [true, true, false, false]);
+
+T("a host-networked exporter still produces the share and its consumers",
+  (() => {
+    const hostNet = newCard();
+    hostNet._addonInfoCache.set("c9a35110_sambanas", {
+      name: "Samba NAS", network: null, options: { workgroup: "WORKGROUP", moredisks: ["NAS1"] },
+    });
+    hostNet._derive();
+    const share = hostNet._derived.nodes.find((n) => n.kind === "share");
+    return [share?.label, hostNet._derived.edges.filter((e) => e[0] === share?.id).length];
+  })(), ["NAS1 (SMB)", 2]);
+
+// Attributing every unresolved rule to Home Assistant put someone else's
+// subdomain on the host and left the real add-on with no hostname at all.
+T("only Home Assistant's own port resolves to Home Assistant",
+  (() => {
+    const card = newCard();
+    const addons = card._derived.nodes.filter((n) => n.kind === "addon");
+    return [
+      card._resolveService("http://192.168.8.25:8123", addons)?.id,
+      card._resolveService("http://192.168.8.25:9999", addons),
+    ];
+  })(), ["host", null]);
+T("a rule pointing at an add-on's own container address resolves to it",
+  (() => {
+    const card = newCard();
+    card._addonInfoCache.get("3b88f413_immich").ip_address = "172.30.33.9";
+    card._derive();
+    const addons = card._derived.nodes.filter((n) => n.kind === "addon");
+    return card._resolveService("http://172.30.33.9:3001", addons)?.id;
+  })(), addonId("3b88f413_immich"));
+
+// Even when a rule cannot be attributed, the hostname must still be visible.
+T("a tunnel wears its hostnames whether or not they resolve",
+  (() => {
+    const stray = newCard({}, {
+      logRoutes: [
+        { hostname: "a.example.com", service: "http://192.168.8.25:8080", viaSlug: "9074a9fa_cloudflared" },
+        { hostname: "b.example.com", service: "http://192.168.8.25:9999", viaSlug: "9074a9fa_cloudflared" },
+      ],
+    });
+    const tunnel = stray._node(addonId("9074a9fa_cloudflared"));
+    return [tunnel.routes.length, stray._nodeState(tunnel).sub, tunnel.notes.includes("b.example.com → http://192.168.8.25:9999")];
+  })(), [2, "2 hostnames · 1 unmatched", true]);
+
 // --- the boundary ----------------------------------------------------------
 // "Which of these is a way in?" should be answerable from the shape of the
 // map, not by reading tier labels.

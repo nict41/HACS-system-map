@@ -8,6 +8,43 @@ was already there in a way an existing dashboard would notice.
 `VERSION` in `system-map-card.js` is the source of truth and CI refuses to
 publish a release whose tag doesn't match it.
 
+## [1.5.0] - 2026-09-02
+
+### Fixed
+
+Three bugs, all of which showed up together on a real instance as "no share
+node, and no hostnames on anything".
+
+- **Ports were only ever read from `network`.** An add-on running on the host
+  network publishes nothing through that field - it is `null` - and that is
+  the normal case for Samba and for several media add-ons. So their ports
+  were invisible: no SMB server was detected, no share node was drawn, and
+  every tunnel rule pointing at one of their ports failed to match. Ports are
+  now also read from the add-on's web-UI template (which carries the literal
+  port precisely when there is no mapping to look one up in) and from its
+  ingress port.
+- **A host-networked Samba is now recognised** by its own `workgroup` option
+  when its ports aren't visible. That is a Samba concept and nothing else's,
+  which makes it evidence rather than a guess at the add-on's name.
+- **Unresolved tunnel rules were silently blamed on Home Assistant.** Any
+  local rule whose port matched no add-on fell back to the host, so with
+  host-networked add-ons every subdomain was attributed to Home Assistant and
+  the add-ons actually serving them got no hostname at all. Only Home
+  Assistant's own port resolves to Home Assistant now; anything else is left
+  honestly unmatched. Rules pointing at an add-on's container address also
+  resolve properly.
+- **The status bar never saw the routes.** Add-on options and tunnel rules
+  arrive after the first paint, and the late refresh redrew only the graph -
+  so the Exposed pill, built entirely from routes, could never appear. The
+  whole card is redrawn now.
+
+### Added
+
+- A tunnel add-on wears its own hostnames: `4 hostnames · 1 unmatched` as its
+  sub-label, and the full list of hostname → service → what it matched in its
+  detail panel. So "what is exposed, and through what" is answerable from the
+  map even when a rule cannot be attributed to the add-on behind it.
+
 ## [1.4.0] - 2026-09-02
 
 ### Added
