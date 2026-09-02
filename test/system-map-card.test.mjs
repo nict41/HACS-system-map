@@ -370,6 +370,75 @@ T("add-ons placed in a tier are not repeated in the leftovers grid",
     return c._addons.every((a) => !c._nodePositions.has(`addon:${a.slug}`));
   })(), true);
 
+// --- route resolution, step by step ----------------------------------------
+// A private address is this machine whatever /network/info said. Depending on
+// that endpoint having answered - and having named the same interface the
+// tunnel rule points at - is the difference between every hostname landing
+// and none of them landing.
+T("a private address is recognised without help from /network/info",
+  [
+    ctx.isPrivateAddress("192.168.8.25"), ctx.isPrivateAddress("10.0.0.4"),
+    ctx.isPrivateAddress("172.30.33.4"), ctx.isPrivateAddress("127.0.0.1"),
+    ctx.isPrivateAddress("172.15.0.1"), ctx.isPrivateAddress("8.8.8.8"),
+  ], [true, true, true, true, false, false]);
+T("a rule resolves even when the network endpoint told us nothing",
+  (() => {
+    const blind = newCard();
+    blind._system.network = null; // /network/info failed or was empty
+    blind._derive();
+    return blind._routes.find((r) => r.hostname === "nas.example.com")?.targetId;
+  })(), addonId("3b88f413_immich"));
+
+T("every rule records why it landed where it did",
+  c._routes.map((r) => [r.hostname, r.trace.reason]),
+  [
+    ["ha.example.com", "port 8123 is Home Assistant's own"],
+    ["nas.example.com", "port 8080 is published by this add-on"],
+  ]);
+T("an unmatched rule says what it was looking for and what was on offer",
+  (() => {
+    const stray = newCard({}, {
+      logRoutes: [{ hostname: "x.example.com", service: "http://192.168.8.25:7777", viaSlug: "9074a9fa_cloudflared" }],
+    });
+    const t = stray._routes[0].trace;
+    return [t.reason, t.port, t.local, t.candidates.some((line) => line.startsWith("Immich:"))];
+  })(), ["no add-on reports port 7777", 7777, true, true]);
+T("a rule pointing off this machine says so rather than failing silently",
+  (() => {
+    const off = newCard({}, {
+      logRoutes: [{ hostname: "y.example.com", service: "http://203.0.113.9:80", viaSlug: "9074a9fa_cloudflared" }],
+    });
+    return off._routes[0].trace.reason;
+  })(), "203.0.113.9 is not this machine, so the rule points somewhere else");
+
+// A remotely-managed tunnel can be configured entirely outside Home
+// Assistant, leaving an add-on whose options say nothing at all.
+T("logs are scanned even when no add-on's options look like a tunnel",
+  await (async () => {
+    const card = newCard();
+    card._addonInfoCache.set("9074a9fa_cloudflared", { name: "Cloudflared", network: {}, options: {} });
+    const read = [];
+    card._fetchAddonLog = async (slug) => {
+      read.push(slug);
+      return slug === "9074a9fa_cloudflared"
+        ? 'INF config="{\\"ingress\\":[{\\"hostname\\":\\"found.example.com\\", \\"service\\":\\"http://192.168.8.25:8080\\"}]}"'
+        : "nothing";
+    };
+    await card._loadRouteLogs();
+    return [card._routeScan.fallback, card._logRoutes.map((r) => r.hostname), read.length > 1];
+  })(), [true, ["found.example.com"], true]);
+T("the cheap path is still the usual one",
+  await (async () => {
+    const card = newCard();
+    const read = [];
+    card._fetchAddonLog = async (slug) => {
+      read.push(slug);
+      return 'INF config="{\\"ingress\\":[{\\"hostname\\":\\"a.example.com\\", \\"service\\":\\"http://192.168.8.25:8080\\"}]}"';
+    };
+    await card._loadRouteLogs();
+    return [card._routeScan.fallback, read];
+  })(), [false, ["9074a9fa_cloudflared"]]);
+
 // --- add-on icons ----------------------------------------------------------
 // Supervisor serves each add-on's own icon, but the endpoint needs auth an
 // <image> tag cannot send - hence the signed URL, exactly as HA's own

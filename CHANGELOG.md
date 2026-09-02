@@ -8,6 +8,37 @@ was already there in a way an existing dashboard would notice.
 `VERSION` in `system-map-card.js` is the source of truth and CI refuses to
 publish a release whose tag doesn't match it.
 
+## [1.7.0] - 2026-09-02
+
+### Fixed
+
+Two ways a Cloudflare hostname could fail to reach the add-on serving it,
+both silent:
+
+- **A rule's address had to be confirmed local by `/network/info`.** If that
+  endpoint hadn't answered, or reported a different interface from the one
+  the rule names, every rule was rejected as "somewhere else" and no service
+  got a hostname. Any private address (RFC1918, loopback, link-local, unique
+  local IPv6) is now recognised as this machine on its own merits - a tunnel
+  ingress rule pointing at `192.168.8.25` needs no corroboration.
+- **A remotely-managed tunnel can have empty options**, since it is
+  configured entirely outside Home Assistant. Log reading was gated on an
+  add-on's options naming a tunnel, so such an add-on was skipped and its
+  rules never read. When that cheap path finds nothing, every running
+  add-on's log is now scanned and the parser decides - a log either contains
+  ingress rules or it doesn't. The usual case is still one or two reads.
+
+### Added
+
+- **The evidence panel shows the whole route chain**, so a hostname that
+  doesn't land can be diagnosed instead of guessed at. A new "Route
+  discovery" section lists which logs were read, how many bytes and rules
+  came out of each, which add-ons were skipped and why, whether the fallback
+  scan ran, and what is being treated as local. Each rule then reports the
+  host and port parsed out of it, whether that host is this machine, exactly
+  why it did or didn't match an add-on, and - when it didn't - every port
+  each add-on actually reports.
+
 ## [1.6.1] - 2026-09-02
 
 ### Fixed

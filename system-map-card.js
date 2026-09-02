@@ -112,7 +112,7 @@
 // version in the console is always the version of the file that's running -
 // which is the first thing worth knowing when a dashboard misbehaves after
 // an update, and the quickest way to catch a stale browser cache.
-const VERSION = "1.6.1";
+const VERSION = "1.7.0";
 
 console.info(
   `%c SYSTEM-MAP-CARD %c v${VERSION} `,
@@ -220,6 +220,23 @@ const DOMAIN_SERVICE_PORTS = {
   postgresql: 5432,
   recorder: 3306,
 };
+
+// A tunnel's ingress rules point at addresses on this network. Recognising
+// them must not depend on /network/info having answered, or on the rule
+// naming the same interface the Supervisor reports - so any private address
+// counts. This is what makes "http://192.168.8.25:8080" resolvable on an
+// instance where the network endpoint returned nothing useful.
+function isPrivateAddress(host) {
+  return (
+    /^127\./.test(host) ||
+    host === "::1" ||
+    /^10\./.test(host) ||
+    /^192\.168\./.test(host) ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+    /^169\.254\./.test(host) ||
+    /^f[cd][0-9a-f]{2}:/i.test(host)
+  );
+}
 
 // Hostnames that mean "this machine" inside an ingress or proxy rule, so a
 // route pointing at one is resolved by port rather than by name.
@@ -1705,14 +1722,45 @@ class SystemMapCard extends HTMLElement {
   // reads rather than one per add-on.
   async _loadRouteLogs() {
     const found = [];
+    this._routeScan = { considered: [], scanned: [], fallback: false };
+
+    const scan = async (addon, why) => {
+      const log = await this._fetchAddonLog(addon.slug, 0);
+      this._logSizes.set(addon.slug, log ? log.length : 0);
+      const routes = routesFromLog(log);
+      this._routeScan.scanned.push(
+        `${addon.name || addon.slug}: ${why}, ${log ? log.length : 0} bytes, ${routes.length} rule${routes.length === 1 ? "" : "s"}`
+      );
+      for (const route of routes) found.push({ ...route, viaSlug: addon.slug });
+    };
+
     for (const addon of this._addons) {
       if (!this.isConnected) return;
       const info = this._addonInfoCache.get(addon.slug);
-      if (!info || info._error || !looksLikeIngressProvider(info.options)) continue;
-      const log = await this._fetchAddonLog(addon.slug, 0);
-      this._logSizes.set(addon.slug, log ? log.length : 0);
-      for (const route of routesFromLog(log)) found.push({ ...route, viaSlug: addon.slug });
+      if (!info || info._error) continue;
+      if (!looksLikeIngressProvider(info.options)) {
+        this._routeScan.considered.push(`${addon.name || addon.slug}: no tunnel-shaped option`);
+        continue;
+      }
+      await scan(addon, "options name a tunnel or proxy");
     }
+
+    // Nothing looked like a tunnel by its options, but a remotely-managed one
+    // can be configured entirely outside Home Assistant - leaving an add-on
+    // whose options say nothing at all. Rather than conclude there are no
+    // routes, read the running add-ons' logs and let the parser decide: a
+    // log either contains ingress rules or it doesn't. Only reached when the
+    // cheap path found nothing, so the usual case is still one or two reads.
+    if (!found.length) {
+      this._routeScan.fallback = true;
+      for (const addon of this._addons) {
+        if (!this.isConnected) return;
+        if (addon.state !== "started") continue;
+        if (this._logSizes.has(addon.slug)) continue;
+        await scan(addon, "fallback scan");
+      }
+    }
+
     this._logRoutes = found;
 
     // Optional, and off by default because it means reading every running
@@ -1972,10 +2020,33 @@ class SystemMapCard extends HTMLElement {
       ];
     });
 
-    const routeRows = (this._routes || []).map((r) => [
-      r.hostname,
-      `${esc(r.service)} → ${esc(byId.get(r.targetId)?.label || "unresolved")} <code>${esc(r.source)}</code>, via ${esc(r.viaSlug || "?")}`,
-    ]);
+    // The whole chain, step by step: which logs were read, what came out of
+    // them, and for each rule exactly why it did or didn't land on an add-on.
+    const routeRows = (this._routes || []).map((r) => {
+      const t = r.trace || {};
+      const landed = byId.get(r.targetId)?.label;
+      return [
+        r.hostname,
+        [
+          `${esc(r.service)} → <strong>${esc(landed || "not matched")}</strong>`,
+          `host <code>${esc(t.host || "?")}</code>, port <code>${esc(String(t.port ?? "none"))}</code>` +
+            (t.local === undefined ? "" : `, ${t.local ? "on this machine" : "<strong>not this machine</strong>"}`),
+          `${landed ? "matched" : "not matched"}: ${esc(t.reason || "no reason recorded")}`,
+          `from ${esc(r.source)}, via ${esc(r.viaSlug || "?")}`,
+          !landed && t.candidates?.length ? `ports seen: <code>${esc(t.candidates.join(" · "))}</code>` : "",
+        ]
+          .filter(Boolean)
+          .join("<br>"),
+      ];
+    });
+
+    const scan = this._routeScan || {};
+    const scanRows = [
+      ["Logs read", (scan.scanned || []).length ? esc((scan.scanned || []).join("; ")) : none("none")],
+      scan.fallback ? ["Fallback", "no add-on's options named a tunnel, so every running add-on's log was read"] : null,
+      ["Skipped", (scan.considered || []).length ? esc((scan.considered || []).join("; ")) : none("none")],
+      ["Treated as local", esc([...this._localHosts()].join(", "))],
+    ].filter(Boolean);
 
     const hardwareRows = this._derived.nodes
       .filter((n) => n.kind === "hardware")
@@ -1995,6 +2066,7 @@ class SystemMapCard extends HTMLElement {
     el.innerHTML = `
       <h4>Add-ons (${this._addons.length})</h4>${table(addonRows)}
       <h4>Discovered hardware (${hardwareRows.length})</h4>${table(hardwareRows)}
+      <h4>Route discovery</h4>${table(scanRows)}
       <h4>External routes (${routeRows.length})</h4>${table(routeRows)}
       <h4>Services named in logs (${dialled.length})</h4>${
         this._config.scan_service_logs ? table(dialled) : none("log scanning is off - enable \"Scan logs for service links\" to fill this in")
@@ -2253,14 +2325,16 @@ class SystemMapCard extends HTMLElement {
       const info = this._addonInfoCache.get(node.slug);
       if (!info || info._error) continue;
       for (const raw of collectRoutes(info.options)) {
-        const target = this._resolveService(raw.service, addonNodes);
-        routes.push({ ...raw, viaId: node.id, viaSlug: node.slug, targetId: target?.id ?? null });
+        const trace = {};
+        const target = this._resolveService(raw.service, addonNodes, trace);
+        routes.push({ ...raw, viaId: node.id, viaSlug: node.slug, targetId: target?.id ?? null, trace });
       }
     }
     for (const raw of this._logRoutes || []) {
-      const target = this._resolveService(raw.service, addonNodes);
+      const trace = {};
+      const target = this._resolveService(raw.service, addonNodes, trace);
       const via = addonNodes.find((n) => n.slug === raw.viaSlug);
-      routes.push({ ...raw, viaId: via?.id ?? null, targetId: target?.id ?? null });
+      routes.push({ ...raw, viaId: via?.id ?? null, targetId: target?.id ?? null, trace });
     }
     // An add-on that publishes hostnames for other things is a way in, not a
     // service - that's what makes it "remote access" without knowing its name.
@@ -2280,30 +2354,48 @@ class SystemMapCard extends HTMLElement {
   // "http://addon_x_pingvin:3000" -> that add-on's node. A rule pointing at
   // the machine itself is resolved by port instead, since that's the only
   // thing distinguishing one local service from another.
-  _resolveService(service, addonNodes) {
-    if (!service) return null;
+  // `trace`, when passed, is filled in with every step of the decision. The
+  // evidence panel prints it verbatim: when a hostname doesn't land on the
+  // add-on serving it, the useful question is which link broke, and guessing
+  // at that from the outside is exactly what wasted the most time here.
+  _resolveService(service, addonNodes, trace = {}) {
+    trace.service = service;
+    if (!service) return (trace.reason = "no service in the rule"), null;
     const match = String(service).match(/^(?:[a-z0-9+.-]+:\/\/)?([^/:]+)(?::(\d+))?/i);
-    if (!match) return null;
+    if (!match) return (trace.reason = "could not parse a host out of the rule"), null;
     const [, host, portText] = match;
     const port = portText ? parseInt(portText, 10) : null;
+    trace.host = host;
+    trace.port = port;
 
     const byName = addonNodes.find((n) => addonIdentifiers(n.slug).some((id) => id.toLowerCase() === host.toLowerCase()));
-    if (byName) return byName;
+    if (byName) return (trace.reason = `host is the add-on's own name`), byName;
 
     // A rule can also point straight at an add-on's own container address.
     const byIp = addonNodes.find((n) => this._addonInfoCache.get(n.slug)?.ip_address === host);
-    if (byIp) return byIp;
+    if (byIp) return (trace.reason = `host is the add-on's container address`), byIp;
 
-    if (!this._localHosts().has(host.toLowerCase()) || !port) return null;
-    const byPort = addonNodes.find((n) => hostPortsFor(this._addonInfoCache.get(n.slug)).has(port));
-    if (byPort) return byPort;
+    const local = this._localHosts().has(host.toLowerCase()) || isPrivateAddress(host);
+    trace.local = local;
+    if (!local) return (trace.reason = `${host} is not this machine, so the rule points somewhere else`), null;
+    if (!port) return (trace.reason = "rule has no port to match on"), null;
+
+    const candidates = addonNodes
+      .map((n) => ({ node: n, ports: [...hostPortsFor(this._addonInfoCache.get(n.slug))] }))
+      .filter((c) => c.ports.length);
+    trace.candidates = candidates.map((c) => `${c.node.label}: ${c.ports.join(", ")}`);
+
+    const byPort = candidates.find((c) => c.ports.includes(port));
+    if (byPort) return (trace.reason = `port ${port} is published by this add-on`), byPort.node;
 
     // Only Home Assistant's own port is Home Assistant. Treating every
     // unresolved local rule as the host was worse than leaving it unresolved:
     // it quietly attributed someone else's subdomain to Home Assistant and
     // left the add-on actually serving it with no hostname at all.
     const corePort = Number(this._system.core?.port) || 8123;
-    return port === corePort ? { id: "host" } : null;
+    if (port === corePort) return (trace.reason = `port ${port} is Home Assistant's own`), { id: "host" };
+    trace.reason = `no add-on reports port ${port}`;
+    return null;
   }
 
   // Positions, computed rather than authored. Tiers stack down the page in

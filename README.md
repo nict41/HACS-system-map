@@ -125,12 +125,21 @@ group_by_area: true
 
 ### When the map is missing something
 
-Turn on **Show the evidence panel** in the visual editor. It lists, per
-add-on, the ports it publishes, the roles and tier derived from them, its
-option keys, whether its log was read and every edge derived for it - plus
-the external routes and what each resolved to. If an add-on shows no ports,
-no matched options and no log evidence, the information genuinely isn't in
-any API the card can reach, and no amount of configuration will surface it.
+Turn on **Show the evidence panel** in the visual editor (card ⋮ → Edit →
+**Live data & joins** → **Show the evidence panel**). It lists, per add-on,
+the ports it publishes, the roles and tier derived from them, its option
+keys, whether its log was read and every edge derived for it.
+
+For a public hostname that isn't landing on the add-on serving it, the
+**Route discovery** and **External routes** sections walk the whole chain:
+which logs were read and what came out of them, which add-ons were skipped
+and why, what is being treated as local, and for each rule the host and port
+parsed out of it plus exactly why it did or didn't match - including every
+port each add-on reports, when it didn't.
+
+If an add-on shows no ports, no matched options and no log evidence, the
+information genuinely isn't in any API the card can reach, and no amount of
+configuration will surface it.
 
 ### A note on `show_addon_logs`
 
