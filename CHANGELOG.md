@@ -8,6 +8,32 @@ was already there in a way an existing dashboard would notice.
 `VERSION` in `system-map-card.js` is the source of truth and CI refuses to
 publish a release whose tag doesn't match it.
 
+## [1.10.0] - 2026-09-02
+
+### Added
+
+- **Pinch to zoom, and two-finger pan.** A phone has no scroll wheel and the
+  on-screen zoom buttons are a poor substitute for the gesture everyone
+  already knows. Two fingers now zoom the map about the point between them:
+  whatever was under the midpoint when the fingers went down stays under it
+  for the whole gesture, so the map tracks the fingers rather than drifting,
+  and dragging both fingers pans as a side effect of the same maths. Lifting
+  back to one finger resumes panning from where that finger currently is
+  instead of jumping the map, and the lift that ends a pinch no longer opens
+  the detail panel of whatever happened to be underneath. The card's click
+  handling moved into a method of its own so the gesture tests can exercise
+  it without standing up the whole shell.
+
+### Fixed
+
+- **The hostname pill was white text on amber.** The rules written for the
+  old circular nodes (`.smc-node text`) are more specific than the card's own
+  (`.smc-card-name`, `.smc-host-pill-text`), so they won the cascade and
+  painted every card, pill included - which is why the pill's dark text never
+  applied and the name and address rendered at the same size and colour. The
+  circle rules are now scoped to the nodes they were written for, and the
+  card rules qualified so they win outright.
+
 ## [1.9.0] - 2026-09-02
 
 ### Changed

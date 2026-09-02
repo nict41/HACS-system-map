@@ -112,7 +112,7 @@
 // version in the console is always the version of the file that's running -
 // which is the first thing worth knowing when a dashboard misbehaves after
 // an update, and the quickest way to catch a stale browser cache.
-const VERSION = "1.9.0";
+const VERSION = "1.10.0";
 
 console.info(
   `%c SYSTEM-MAP-CARD %c v${VERSION} `,
@@ -1046,9 +1046,7 @@ class SystemMapCard extends HTMLElement {
         .smc-tier-label { font-size: 12px; font-weight: 700; letter-spacing: 0.4px; text-transform: uppercase; }
         .smc-badge { fill: #ffca28; font-size: 10px; font-weight: 700; text-anchor: middle; letter-spacing: 0.3px; }
         .smc-node circle { stroke: var(--card-background-color, #fff); stroke-width: 3; cursor: pointer; transition: opacity 0.15s ease; }
-        .smc-node text { fill: var(--primary-text-color); font-size: 12px; font-weight: 500; text-anchor: middle; pointer-events: none; }
-        .smc-node .smc-sub { fill: var(--secondary-text-color); font-size: 10px; font-weight: 400; }
-        .smc-node.smc-node-small text { font-size: 9px; fill: white; }
+        .smc-node-small text { fill: white; font-size: 9px; font-weight: 500; text-anchor: middle; pointer-events: none; }
         .smc-node.smc-dim { opacity: 0.2; }
         .smc-node-small.smc-hi circle { stroke: #ffca28; stroke-width: 5; }
         .smc-edge { stroke: var(--divider-color, #999); stroke-width: 2; fill: none; transition: opacity 0.15s ease; }
@@ -1111,15 +1109,15 @@ class SystemMapCard extends HTMLElement {
         .smc-card { fill: var(--card-background-color, #1c1c1c); stroke: var(--divider-color, #4a4a4a); stroke-width: 1; cursor: pointer; transition: opacity 0.15s ease; }
         .smc-card-node:hover .smc-card { stroke: var(--primary-color, #3f51b5); stroke-width: 2; }
         .smc-card-stripe { pointer-events: none; }
-        .smc-card-name { fill: var(--primary-text-color); font-size: 12.5px; font-weight: 600; text-anchor: middle; pointer-events: none; }
-        .smc-card-sub { fill: var(--secondary-text-color); font-size: 10px; font-weight: 400; text-anchor: middle; pointer-events: none; }
-        .smc-card-sub.smc-card-bad { fill: var(--error-color, #db4437); font-weight: 600; }
+        .smc-card-node .smc-card-name { fill: var(--primary-text-color); font-size: 12.5px; font-weight: 600; text-anchor: middle; pointer-events: none; }
+        .smc-card-node .smc-card-sub { fill: var(--secondary-text-color); font-size: 10px; font-weight: 400; text-anchor: middle; pointer-events: none; }
+        .smc-card-node .smc-card-sub.smc-card-bad { fill: var(--error-color, #db4437); font-weight: 600; }
         /* The hostname is the one fact worth spotting from across the room -
            if a node has one it is reachable from outside - so it gets the
            same amber the boundary and the EXPOSED status pill use, filled
            rather than outlined so it reads before the node's own name does. */
-        .smc-host-pill { fill: #ffca28; pointer-events: none; }
-        .smc-host-pill-text { fill: #1b1b1b; font-size: 10.5px; font-weight: 700; text-anchor: middle; letter-spacing: 0.2px; pointer-events: none; }
+        .smc-card-node .smc-host-pill { fill: #ffca28; pointer-events: none; }
+        .smc-card-node .smc-host-pill-text { fill: #1b1b1b; font-size: 10.5px; font-weight: 700; text-anchor: middle; letter-spacing: 0.2px; pointer-events: none; }
         .smc-card-node.smc-problem .smc-card { stroke: var(--error-color, #db4437); stroke-width: 2; }
         .smc-card-node.smc-hi .smc-card { stroke: #ffca28; stroke-width: 3; }
         .smc-problem-badge { fill: var(--error-color, #db4437); font-size: 10px; font-weight: 700; text-anchor: middle; }
@@ -1165,21 +1163,31 @@ class SystemMapCard extends HTMLElement {
 
     // Event delegation for clicks - listeners attached once here rather
     // than re-bound on every render.
-    this.addEventListener("click", (ev) => {
-      if (ev.target.closest(".smc-filter, .smc-zoom-controls, .smc-finder")) return;
-      const node = ev.target.closest("[data-node]");
-      if (node) return this._openDetail("node", node.getAttribute("data-node"));
-      const addonNode = ev.target.closest("[data-node-addon]");
-      if (addonNode) return this._openDetail("addon", addonNode.getAttribute("data-node-addon"));
-      const entryNode = ev.target.closest("[data-node-entry]");
-      if (entryNode) return this._openDetail("entry", entryNode.getAttribute("data-node-entry"));
-      const pill = ev.target.closest("[data-status]");
-      if (pill) return this._openDetail("status", pill.getAttribute("data-status"));
-      const chip = ev.target.closest("[data-chip]");
-      if (chip) return this._openDetail(chip.getAttribute("data-chip-kind"), chip.getAttribute("data-chip"));
-      const close = ev.target.closest(".smc-detail-close");
-      if (close) return this._closeDetail();
-    });
+    this.addEventListener("click", (ev) => this._onCardClick(ev));
+  }
+
+  // Delegated: one listener for the whole card, so re-rendering the graph
+  // never has to rewire anything.
+  _onCardClick(ev) {
+    if (ev.target.closest(".smc-filter, .smc-zoom-controls, .smc-finder")) return;
+    // A pinch ends as a pointerup on whatever was under the fingers, which
+    // the browser then reports as a click on that node.
+    if (this._suppressClick) {
+      this._suppressClick = false;
+      return;
+    }
+    const node = ev.target.closest("[data-node]");
+    if (node) return this._openDetail("node", node.getAttribute("data-node"));
+    const addonNode = ev.target.closest("[data-node-addon]");
+    if (addonNode) return this._openDetail("addon", addonNode.getAttribute("data-node-addon"));
+    const entryNode = ev.target.closest("[data-node-entry]");
+    if (entryNode) return this._openDetail("entry", entryNode.getAttribute("data-node-entry"));
+    const pill = ev.target.closest("[data-status]");
+    if (pill) return this._openDetail("status", pill.getAttribute("data-status"));
+    const chip = ev.target.closest("[data-chip]");
+    if (chip) return this._openDetail(chip.getAttribute("data-chip-kind"), chip.getAttribute("data-chip"));
+    const close = ev.target.closest(".smc-detail-close");
+    if (close) return this._closeDetail();
   }
 
   // --- zoom / pan -----------------------------------------------------
@@ -1207,42 +1215,28 @@ class SystemMapCard extends HTMLElement {
       { passive: false }
     );
 
-    let pointerState = null;
+    // Every pointer currently down, because a phone's second finger is what
+    // turns a pan into a pinch and there is no other way to know it arrived.
+    const pointers = new Map();
+    let pointerState = null; // one-finger / mouse drag
+    let pinch = null; // two-finger zoom
     const DRAG_THRESHOLD = 4;
 
-    wrap.addEventListener("pointerdown", (ev) => {
-      if (ev.target.closest(".smc-zoom-controls")) return;
-      const svg = this.querySelector(".smc-graph svg");
-      if (!svg || !this._viewBox) return;
-      pointerState = {
-        pointerId: ev.pointerId,
-        startX: ev.clientX,
-        startY: ev.clientY,
-        vbX: this._viewBox.x,
-        vbY: this._viewBox.y,
-        rectW: svg.clientWidth || 1,
-        rectH: svg.clientHeight || 1,
-        dragging: false,
-      };
-    });
-    wrap.addEventListener("pointermove", (ev) => {
-      if (!pointerState || !this._viewBox) return;
-      const dx = ev.clientX - pointerState.startX;
-      const dy = ev.clientY - pointerState.startY;
-      if (!pointerState.dragging) {
-        if (Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) return;
-        pointerState.dragging = true;
-        wrap.setPointerCapture(pointerState.pointerId);
-        const svg = this.querySelector(".smc-graph svg");
-        if (svg) svg.style.cursor = "grabbing";
-      }
-      const vb = this._viewBox;
-      const scaleX = vb.w / pointerState.rectW;
-      const scaleY = vb.h / pointerState.rectH;
-      vb.x = pointerState.vbX - dx * scaleX;
-      vb.y = pointerState.vbY - dy * scaleY;
-      this._applyViewBox();
-    });
+    const graphSvg = () => this.querySelector(".smc-graph svg");
+
+    // Screen to user space through the live CTM rather than by dividing out
+    // the element's box: the SVG letterboxes inside its element whenever the
+    // two aspect ratios differ, and the CTM already accounts for that.
+    const toSvg = (x, y) => {
+      const svg = graphSvg();
+      const ctm = svg?.getScreenCTM?.();
+      if (!ctm) return null;
+      const pt = svg.createSVGPoint();
+      pt.x = x;
+      pt.y = y;
+      return pt.matrixTransform(ctm.inverse());
+    };
+
     const endDrag = () => {
       if (pointerState?.dragging) {
         try {
@@ -1250,11 +1244,88 @@ class SystemMapCard extends HTMLElement {
         } catch (_) {}
       }
       pointerState = null;
-      const svg = this.querySelector(".smc-graph svg");
+      const svg = graphSvg();
       if (svg) svg.style.cursor = "grab";
     };
-    wrap.addEventListener("pointerup", endDrag);
-    wrap.addEventListener("pointercancel", endDrag);
+
+    const beginDrag = (pointerId, clientX, clientY) => {
+      const svg = graphSvg();
+      if (!svg || !this._viewBox) return;
+      pointerState = {
+        pointerId,
+        startX: clientX,
+        startY: clientY,
+        vbX: this._viewBox.x,
+        vbY: this._viewBox.y,
+        rectW: svg.clientWidth || 1,
+        rectH: svg.clientHeight || 1,
+        dragging: false,
+      };
+    };
+
+    const beginPinch = () => {
+      const [a, b] = [...pointers.values()];
+      const dist = Math.hypot(a.x - b.x, a.y - b.y);
+      const mid = toSvg((a.x + b.x) / 2, (a.y + b.y) / 2);
+      if (!dist || !mid || !this._viewBox) return;
+      // A one-finger drag may already be in flight and holding pointer
+      // capture; left running it would pan against the pinch.
+      endDrag();
+      pinch = { dist, mid, vb: { ...this._viewBox } };
+    };
+
+    wrap.addEventListener("pointerdown", (ev) => {
+      if (ev.target.closest(".smc-zoom-controls")) return;
+      pointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+      if (pointers.size === 2) return beginPinch();
+      if (pointers.size > 2) return;
+      beginDrag(ev.pointerId, ev.clientX, ev.clientY);
+    });
+
+    wrap.addEventListener("pointermove", (ev) => {
+      if (pointers.has(ev.pointerId)) pointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+
+      if (pinch && pointers.size >= 2) {
+        ev.preventDefault();
+        const [a, b] = [...pointers.values()];
+        const dist = Math.hypot(a.x - b.x, a.y - b.y);
+        if (dist) this._pinchTo(pinch, dist, toSvg((a.x + b.x) / 2, (a.y + b.y) / 2));
+        return;
+      }
+
+      if (!pointerState || pointerState.pointerId !== ev.pointerId || !this._viewBox) return;
+      const dx = ev.clientX - pointerState.startX;
+      const dy = ev.clientY - pointerState.startY;
+      if (!pointerState.dragging) {
+        if (Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) return;
+        pointerState.dragging = true;
+        wrap.setPointerCapture(pointerState.pointerId);
+        const svg = graphSvg();
+        if (svg) svg.style.cursor = "grabbing";
+      }
+      const vb = this._viewBox;
+      vb.x = pointerState.vbX - dx * (vb.w / pointerState.rectW);
+      vb.y = pointerState.vbY - dy * (vb.h / pointerState.rectH);
+      this._applyViewBox();
+    });
+
+    const releasePointer = (ev) => {
+      pointers.delete(ev.pointerId);
+      if (pinch) {
+        if (pointers.size >= 2) return;
+        pinch = null;
+        // Lifting one finger must not hand the map to the other mid-gesture:
+        // the remaining pointer has travelled since it went down, so the
+        // drag is re-seeded from where that finger is now, not where it was.
+        const [id, pos] = [...pointers.entries()][0] || [];
+        this._suppressClick = true;
+        if (id === undefined) return endDrag();
+        return beginDrag(id, pos.x, pos.y);
+      }
+      if (pointerState?.pointerId === ev.pointerId) endDrag();
+    };
+    wrap.addEventListener("pointerup", releasePointer);
+    wrap.addEventListener("pointercancel", releasePointer);
 
     this.querySelector(".smc-zoom-in").addEventListener("click", () => this._zoomBy(0.8));
     this.querySelector(".smc-zoom-out").addEventListener("click", () => this._zoomBy(1.25));
@@ -1384,6 +1455,25 @@ class SystemMapCard extends HTMLElement {
     vb.y = centerY - ratioY * newH;
     vb.w = newW;
     vb.h = newH;
+    this._applyViewBox();
+  }
+
+  // A pinch is a zoom about a moving anchor: the user-space point that was
+  // under the midpoint of the two fingers when they went down stays under
+  // that midpoint for the whole gesture. Two-finger panning falls out of
+  // that for free, since the midpoint moving is indistinguishable from it.
+  _pinchTo(pinch, dist, mid) {
+    if (!this._viewBox || !this._naturalViewBox || !mid) return;
+    const vb = this._viewBox;
+    const nat = this._naturalViewBox;
+    const newW = Math.min(nat.w, Math.max(nat.w * 0.12, pinch.vb.w * (pinch.dist / dist)));
+    const newH = newW / (nat.w / nat.h);
+    // How far across the current view the midpoint sits. The viewBox aspect
+    // never changes, so this fraction survives the resize unaltered and can
+    // be reused to place the anchor in the new box.
+    const tx = (mid.x - vb.x) / vb.w;
+    const ty = (mid.y - vb.y) / vb.h;
+    this._viewBox = { x: pinch.mid.x - tx * newW, y: pinch.mid.y - ty * newH, w: newW, h: newH };
     this._applyViewBox();
   }
 

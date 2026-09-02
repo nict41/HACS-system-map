@@ -31,7 +31,14 @@ const ctx = {
   // isConnected is a real DOM property the card checks before doing
   // background work; on a bare stub it is undefined, which would silently
   // skip every background loader under test.
-  HTMLElement: class { get isConnected() { return true; } querySelector() { return null; } addEventListener() {} appendChild() {} },
+  // Listeners are kept rather than dropped so a test can fire the card's own
+  // delegated click handler, which is where node selection lives.
+  HTMLElement: class {
+    get isConnected() { return true; }
+    querySelector() { return null; }
+    appendChild() {}
+    addEventListener(type, fn) { (this._listeners ||= {})[type] = [...((this._listeners || {})[type] || []), fn]; }
+  },
   customElements: { define: () => {} },
   window: { customCards: [], addEventListener: () => {} },
   document: { addEventListener: () => {}, createElement: () => makeEl(), createElementNS: () => makeEl() },
@@ -1153,5 +1160,148 @@ T("every schema field has a human label",
 editor._form.fire("value-changed", { value: { title: "Renamed", show_legend: false } });
 T("a form change emits config-changed carrying the card type and the new values",
   emitted, { type: "custom:system-map-card", title: "Renamed", show_legend: false });
+
+// --- pinch to zoom ---------------------------------------------------------
+// A phone has no wheel and no zoom buttons worth hitting, so the pinch is the
+// whole zoom story there. Two things can break independently: the anchor
+// maths (the map drifts out from under the fingers) and the wiring (the
+// second finger never starts a pinch at all), so both are asserted.
+
+// Stubbed so that user space and client space coincide - the CTM is the
+// identity - which makes the expected numbers below readable by hand.
+function pinchCard() {
+  const card = newCard();
+  const wrap = makeEl();
+  wrap.setPointerCapture = () => {};
+  wrap.releasePointerCapture = () => {};
+  const svg = {
+    clientWidth: 400,
+    clientHeight: 300,
+    style: {},
+    attrs: {},
+    setAttribute(k, v) { this.attrs[k] = v; },
+    getScreenCTM: () => ({ inverse: () => ({}) }),
+    createSVGPoint: () => ({
+      x: 0,
+      y: 0,
+      matrixTransform() {
+        const vb = card._viewBox;
+        return { x: vb.x + (this.x / 400) * vb.w, y: vb.y + (this.y / 300) * vb.h };
+      },
+    }),
+  };
+  const extra = new Map([
+    [".smc-graph-wrap", wrap], [".smc-graph svg", svg],
+    [".smc-zoom-in", makeEl()], [".smc-zoom-out", makeEl()],
+    [".smc-zoom-reset", makeEl()], [".smc-export", makeEl()],
+  ]);
+  const base = card.querySelector;
+  card.querySelector = (sel) => extra.get(sel) || base(sel);
+  card._naturalViewBox = { x: 0, y: 0, w: 400, h: 300 };
+  card._viewBox = { ...card._naturalViewBox };
+  card._buildZoomPan();
+  const at = (x, y) => ({ x, y });
+  const send = (type, id, x, y, target) =>
+    (wrap._listeners[type] || []).forEach((fn) =>
+      fn({ pointerId: id, clientX: x, clientY: y, preventDefault() {}, target: target || { closest: () => null } })
+    );
+  return { card, wrap, svg, send, at };
+}
+
+// Fingers 200px apart around (200,150), spread to 300px apart: the view
+// narrows by exactly 200/300, and (200,150) is still the middle of it.
+const spread = (() => {
+  const { card, send } = pinchCard();
+  send("pointerdown", 1, 100, 150);
+  send("pointerdown", 2, 300, 150);
+  send("pointermove", 1, 50, 150);
+  send("pointermove", 2, 350, 150);
+  return card._viewBox;
+})();
+T("spreading two fingers zooms in", Math.round(spread.w), 267);
+T("a pinch keeps the viewBox aspect ratio", Math.round((spread.w / spread.h) * 1e6), Math.round((400 / 300) * 1e6));
+T("the point under the fingers stays under the fingers",
+  [Math.round(spread.x + spread.w / 2), Math.round(spread.y + spread.h / 2)], [200, 150]);
+
+T("bringing two fingers together zooms out",
+  (() => {
+    const { card, send } = pinchCard();
+    card._viewBox = { x: 100, y: 75, w: 200, h: 150 };
+    send("pointerdown", 1, 50, 150);
+    send("pointerdown", 2, 350, 150);
+    send("pointermove", 1, 100, 150);
+    send("pointermove", 2, 300, 150);
+    return Math.round(card._viewBox.w);
+  })(), 300);
+
+T("a pinch cannot zoom in past the close limit, or out past the whole map",
+  (() => {
+    const zoomIn = pinchCard();
+    zoomIn.send("pointerdown", 1, 190, 150);
+    zoomIn.send("pointerdown", 2, 210, 150);
+    zoomIn.send("pointermove", 1, 0, 150);
+    zoomIn.send("pointermove", 2, 400, 150);
+    const zoomOut = pinchCard();
+    zoomOut.send("pointerdown", 1, 0, 150);
+    zoomOut.send("pointerdown", 2, 400, 150);
+    zoomOut.send("pointermove", 1, 199, 150);
+    zoomOut.send("pointermove", 2, 201, 150);
+    return [Math.round(zoomIn.card._viewBox.w), zoomOut.card._viewBox.w];
+  })(), [48, 400]);
+
+T("one finger still pans, and does not pinch against itself",
+  (() => {
+    const { card, send } = pinchCard();
+    send("pointerdown", 1, 200, 150);
+    send("pointermove", 1, 150, 150);
+    return [card._viewBox.w, card._viewBox.x];
+  })(), [400, 50]);
+
+// The drag in flight holds pointer capture and its own start position; left
+// running, it would pan the map against the pinch on every move.
+T("a second finger takes over from a drag already in progress",
+  (() => {
+    const { card, send } = pinchCard();
+    send("pointerdown", 1, 100, 150);
+    send("pointermove", 1, 60, 150); // past the drag threshold: now panning
+    const panned = card._viewBox.x;
+    send("pointerdown", 2, 300, 150);
+    send("pointermove", 1, 10, 150);
+    send("pointermove", 2, 350, 150);
+    return [panned !== 0, Math.round(card._viewBox.w) < 400];
+  })(), [true, true]);
+
+// Lifting one finger must not hand the map to the other where that finger
+// *started*, or the map jumps by however far it travelled during the pinch.
+T("lifting to one finger resumes panning from where that finger now is",
+  (() => {
+    const { card, send } = pinchCard();
+    send("pointerdown", 1, 100, 150);
+    send("pointerdown", 2, 300, 150);
+    send("pointermove", 1, 50, 150);
+    send("pointermove", 2, 350, 150);
+    const afterPinch = { ...card._viewBox };
+    send("pointerup", 2, 350, 150);
+    send("pointermove", 1, 50, 150); // hasn't moved since: nothing should shift
+    return [card._viewBox.x === afterPinch.x, card._viewBox.w === afterPinch.w];
+  })(), [true, true]);
+
+T("the finger lift that ends a pinch does not open a node's detail panel",
+  (() => {
+    const { card, send } = pinchCard();
+    let opened = null;
+    card._openDetail = (kind, id) => { opened = [kind, id]; };
+    send("pointerdown", 1, 100, 150);
+    send("pointerdown", 2, 300, 150);
+    send("pointerup", 2, 300, 150);
+    const node = { closest: (sel) => (sel === "[data-node]" ? { getAttribute: () => "host" } : null) };
+    const click = () => card._onCardClick({ target: node });
+    click();
+    const duringGesture = opened;
+    // ...and only that one click: the next real tap must still select.
+    click();
+    return [duringGesture, opened];
+  })(), [null, ["node", "host"]]);
+
 
 process.exit(all ? 0 : 1);

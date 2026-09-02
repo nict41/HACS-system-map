@@ -26,7 +26,8 @@ outline and a count.
 - Nothing is ever missing: below the curated tiers, every remaining add-on
   and *every* config entry is auto-laid-out into its own labelled grid, so
   each installed integration has a real node on the map
-- Zoom (mouse wheel or on-screen buttons) and pan (click-drag)
+- Zoom (mouse wheel, pinch, or on-screen buttons) and pan (drag with one
+  finger, the mouse, or two fingers during a pinch)
 - Click any node for live detail: state, version, internal port, and (where
   applicable) its public URL
 - "Hide inactive" filter for stopped add-ons and disabled/ignored
@@ -178,7 +179,7 @@ checked against `VERSION` and refused if the two disagree.
 ## Development
 
 ```
-node test/system-map-card.test.mjs      # 179 assertions, no dependencies
+node test/system-map-card.test.mjs      # 188 assertions, no dependencies
 ```
 
 No build step: the card is evaluated against a stubbed DOM, covering config
