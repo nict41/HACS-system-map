@@ -15,7 +15,13 @@ import path from "node:path";
 import { chromium } from "playwright";
 
 const root = path.resolve(import.meta.dirname, "..");
-const out = path.join(root, "docs", "screenshot.png");
+// Overrides so one harness can render the README shot, a wide-screen layout,
+// or a node mid-selection, rather than three near-identical scripts.
+const CONFIG = {
+  graph_height: Number(process.env.SMC_HEIGHT || 900),
+  ...(process.env.SMC_COLUMNS ? { columns: Number(process.env.SMC_COLUMNS) } : {}),
+};
+const out = process.env.SMC_OUT || path.join(root, "docs", "screenshot.png");
 const cardSource = fs.readFileSync(path.join(root, "system-map-card.js"), "utf8");
 
 const ADDONS = [
@@ -117,6 +123,8 @@ const page = `<!doctype html><html><head><meta charset="utf-8"><style>
 <script>${cardSource}</script>
 <script>
   const ADDONS = ${JSON.stringify(ADDONS)};
+  const CONFIG = ${JSON.stringify(CONFIG)};
+  const SELECT = ${JSON.stringify(process.env.SMC_SELECT || "")};
   const CLOUDFLARED_LOG = ${JSON.stringify(CLOUDFLARED_LOG)};
   const RESPONSES = ${JSON.stringify(RESPONSES)};
   const ENTRIES = ${JSON.stringify(ENTRIES)};
@@ -198,10 +206,20 @@ const page = `<!doctype html><html><head><meta charset="utf-8"><style>
   // user units once both auto-grids are in it, so a short graph area fits it
   // by height and leaves the sides empty. ~1180/0.71 is the height at which
   // it fills the width instead.
-  card.setConfig({ type: "custom:system-map-card", graph_height: 900, refresh_interval: 0, show_debug: true });
+  card.setConfig({ type: "custom:system-map-card", refresh_interval: 0, show_debug: true, ...CONFIG });
   document.getElementById("host").appendChild(card);
   card.hass = hass;
-  window.__ready = new Promise((r) => setTimeout(r, 3500));
+  // SMC_SELECT drives a real selection, so "what does clicking a node look
+  // like" is something to look at rather than reason about from the markup.
+  window.__ready = new Promise((r) =>
+    setTimeout(async () => {
+      if (SELECT) {
+        await card._openDetail("node", SELECT);
+        card._panToHighlight?.();
+      }
+      setTimeout(r, 300);
+    }, 3500)
+  );
 </script></body></html>`;
 
 // PLAYWRIGHT_CHROMIUM_PATH lets a machine with Chromium already on disk use
@@ -209,13 +227,57 @@ const page = `<!doctype html><html><head><meta charset="utf-8"><style>
 const browser = await chromium.launch(
   process.env.PLAYWRIGHT_CHROMIUM_PATH ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_PATH } : {}
 );
-const tab = await browser.newPage({ viewport: { width: 1240, height: 1000 }, deviceScaleFactor: 2 });
+const tab = await browser.newPage({
+  viewport: { width: Number(process.env.SMC_WIDTH || 1240), height: 1000 },
+  deviceScaleFactor: 2,
+});
 const errors = [];
 tab.on("pageerror", (e) => errors.push(String(e)));
 await tab.setContent(page);
 await tab.evaluate(() => window.__ready);
 fs.mkdirSync(path.dirname(out), { recursive: true });
 await tab.screenshot({ path: out, fullPage: true });
+
+// SMC_EXPORT=<path> also drives the card's own PNG export and saves what it
+// produces, so "the card renders but the export doesn't" is a difference you
+// can look at rather than reason about.
+if (process.env.SMC_EXPORT) {
+  const exported = await tab.evaluate(async () => {
+    const card = document.querySelector("system-map-card");
+    const markup = await card._exportSvg();
+    if (!markup) return { error: "the card produced no SVG to export" };
+    const nat = card._naturalViewBox;
+    const url = URL.createObjectURL(new Blob([markup], { type: "image/svg+xml;charset=utf-8" }));
+    const png = await new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement("canvas");
+        canvas.width = nat.w * 2;
+        canvas.height = nat.h * 2;
+        const ctx = canvas.getContext("2d");
+        ctx.fillStyle = getComputedStyle(card).getPropertyValue("--card-background-color") || "#fff";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL("image/png"));
+      };
+      img.onerror = () => resolve(null);
+      img.src = url;
+    });
+    return { markup, png, nat };
+  });
+  if (exported.error || !exported.png) {
+    console.error(`Export failed: ${exported.error || "the browser refused to rasterise the map"}`);
+    process.exitCode = 1;
+  } else {
+    fs.writeFileSync(process.env.SMC_EXPORT, Buffer.from(exported.png.split(",")[1], "base64"));
+    fs.writeFileSync(process.env.SMC_EXPORT.replace(/\.png$/, ".svg"), exported.markup);
+    console.log(
+      `Wrote ${process.env.SMC_EXPORT} (${exported.nat.w}x${exported.nat.h} user units, ` +
+        `${(exported.markup.length / 1024).toFixed(0)}KB of SVG)`
+    );
+  }
+}
+
 await browser.close();
 
 if (errors.length) {

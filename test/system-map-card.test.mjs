@@ -14,7 +14,8 @@ import fs from "node:fs";
 import vm from "node:vm";
 
 const src = fs.readFileSync("system-map-card.js", "utf8") +
-  "\nglobalThis.__SMC = SystemMapCard;\nglobalThis.__EDITOR = SystemMapCardEditor;\n";
+  "\nglobalThis.__SMC = SystemMapCard;\nglobalThis.__EDITOR = SystemMapCardEditor;\n" +
+  "globalThis.__EXPORT = { resolveCssVars, svgOnlyCss, gridCols, layoutGeometry };\n";
 
 const makeEl = () => ({
   innerHTML: "", textContent: "", hidden: false, scrollTop: 0,
@@ -48,7 +49,7 @@ const ctx = {
 ctx.globalThis = ctx;
 vm.createContext(ctx);
 vm.runInContext(src, ctx);
-const { __SMC: SystemMapCard, __EDITOR: SystemMapCardEditor } = ctx;
+const { __SMC: SystemMapCard, __EDITOR: SystemMapCardEditor, __EXPORT } = ctx;
 
 let all = true;
 const T = (name, got, want) => {
@@ -1303,5 +1304,197 @@ T("the finger lift that ends a pinch does not open a node's detail panel",
     return [duringGesture, opened];
   })(), [null, ["node", "host"]]);
 
+
+// --- export ----------------------------------------------------------------
+// The export is a document of its own: nothing resolves the theme's custom
+// properties for it, nothing supplies a font, and only the SVG's own rules
+// apply. Each of those has been a way for the export to differ from the card
+// on screen while the card itself looked fine.
+const VARS = { "--primary-text-color": "#e1e1e1", "--card-background-color": "" };
+const look = (name) => VARS[name] ?? "";
+
+T("a plain var resolves to the theme's value", __EXPORT.resolveCssVars("var(--primary-text-color)", look), "#e1e1e1");
+T("an undefined var falls back", __EXPORT.resolveCssVars("var(--card-background-color, #fff)", look), "#fff");
+T("a fallback carrying its own parentheses survives",
+  __EXPORT.resolveCssVars("var(--card-background-color, rgba(0, 0, 0, 0.4))", look), "rgba(0, 0, 0, 0.4)");
+T("a var nested in a fallback resolves",
+  __EXPORT.resolveCssVars("var(--card-background-color, var(--primary-text-color))", look), "#e1e1e1");
+T("several vars in one value all resolve",
+  __EXPORT.resolveCssVars("1px solid var(--card-background-color, #333) var(--primary-text-color)", look),
+  "1px solid #333 #e1e1e1");
+T("an unresolvable var with no fallback still yields a colour",
+  __EXPORT.resolveCssVars("var(--nope)", look), "#888");
+
+const SHEET = `
+  .smc-stat { display: flex; padding: 6px 10px; }
+  .smc-card { fill: #1c1c1c; }
+  /* A comment above a rule, which is how most of them are written here. */
+  .smc-card-node .smc-host-pill { fill: #ffca28; }
+  .smc-gone { fill: red; }
+  ha-card { display: block; }
+`;
+const CLASSES = new Set(["smc-card", "smc-card-node", "smc-host-pill", "smc-stat"]);
+const filtered = __EXPORT.svgOnlyCss(SHEET, CLASSES);
+
+// The regression this exists for: a comment has no braces, so it was being
+// swallowed into the following rule's selector, and a selector full of
+// English words matches nothing. It cost the export its amber pills, its
+// dashed boundary and its edge-label halos, silently.
+T("a rule written under a comment is kept", filtered.includes("#ffca28"), true);
+T("a rule for a class the markup doesn't contain is dropped", filtered.includes("smc-gone"), false);
+T("an HTML element rule is dropped", filtered.includes("ha-card"), false);
+// The filter works on selectors, not properties: a class that really is in
+// the markup keeps its rule, and SVG ignores the properties that mean
+// nothing to it. Guessing at properties would be the fragile half.
+T("a rule is judged by its selector, not by whether its properties apply",
+  filtered.includes(".smc-stat"), true);
+T("the SVG rules are kept", filtered.includes(".smc-card {fill: #1c1c1c;}"), true);
+
+// --- selection focus -------------------------------------------------------
+// "What is this connected to" is the question a diagram exists to answer, and
+// it was unanswerable: selecting a node opened a panel and left two dozen
+// identical grey lines on screen.
+
+const SHARE = "share_c9a35110_sambanas_nas1"; // exported by Samba, mounted by Immich and Kiwix
+const focused = (() => {
+  const card = newCard();
+  card._openDetail("node", SHARE);
+  card._renderGraph();
+  return card;
+})();
+const focusedSvg = focused._els.get(".smc-graph").innerHTML;
+
+T("selecting a node marks its own edges hot",
+  (focusedSvg.match(/smc-edge-hot/g) || []).length, 3);
+T("an edge that does not touch the selection is dimmed, not hot",
+  // host->disk is nowhere near the share, so it must be one of the dimmed ones.
+  /<line class="smc-edge[^"]*smc-dim"/.test(focusedSvg), true);
+T("the selected node and its neighbours stay lit",
+  [SHARE, "addon_c9a35110_sambanas", "addon_3b88f413_immich", "addon_beb500c8_kiwix"].map((id) =>
+    new RegExp(`class="[^"]*smc-hi[^"]*" data-node="${id}"`).test(focusedSvg)
+  ), [true, true, true, true]);
+T("a node with no connection to the selection is dimmed",
+  /class="[^"]*smc-dim[^"]*" data-node="addon_a0d7b954_adguard"/.test(focusedSvg), true);
+T("the labels on hot edges are picked out too",
+  (focusedSvg.match(/smc-edge-label-hot/g) || []).length, 3);
+
+T("closing the panel releases the focus",
+  (() => {
+    const card = newCard();
+    card._openDetail("node", SHARE);
+    card._closeDetail();
+    card._renderGraph();
+    return card._els.get(".smc-graph").innerHTML.includes("smc-edge-hot");
+  })(), false);
+
+// The two are different claims - "these are joined" versus "both of these
+// serve the entity you asked about" - so the finder's answer must not be
+// overwritten by whatever node happens to be selected.
+T("the entity finder's answer outranks a selected node",
+  (() => {
+    const card = newCard();
+    card._openDetail("node", SHARE);
+    card._highlight = new Set(["node:addon_a0d7b954_adguard"]);
+    card._renderGraph();
+    const svg = card._els.get(".smc-graph").innerHTML;
+    return [
+      /class="[^"]*smc-hi[^"]*" data-node="addon_a0d7b954_adguard"/.test(svg),
+      new RegExp(`class="[^"]*smc-dim[^"]*" data-node="${SHARE}"`).test(svg),
+      svg.includes("smc-edge-hot"),
+    ];
+  })(), [true, true, false]);
+
+T("selecting the same node twice does not redraw the graph twice",
+  (() => {
+    const card = newCard();
+    let renders = 0;
+    card._renderHighlightables = () => { renders++; };
+    card._openDetail("node", SHARE);
+    card._openDetail("node", SHARE);
+    return renders;
+  })(), 1);
+
+// --- columns ---------------------------------------------------------------
+// Asking for more columns has to widen the canvas too. Squeezing more cards
+// into a fixed 1220 just draws them closer together until they overlap, which
+// is the opposite of using a landscape screen well.
+const geoAt = (columns) => {
+  const card = newCard(columns === undefined ? {} : { columns });
+  card._derive();
+  return { geo: card._geo(), card };
+};
+
+T("the default layout is unchanged", [geoAt().geo.cols, geoAt().geo.width], [6, 1220]);
+T("more columns means a wider canvas", geoAt(10).geo.width, 2 * 110 + 9 * 200);
+T("column spacing never falls below a card's width plus a gap",
+  [3, 6, 9, 12].map((c) => {
+    const { geo } = geoAt(c);
+    return (geo.width - 2 * 110) / (geo.cols - 1);
+  }), [200, 200, 200, 200]);
+T("a silly column count is clamped rather than obeyed",
+  [geoAt(1).geo.cols, geoAt(99).geo.cols, geoAt(0).geo.cols], [3, 12, 6]);
+
+T("the hardware row keeps the host in its middle at any width",
+  [3, 6, 11].map((c) => {
+    const { geo } = geoAt(c);
+    return geo.hostCol === Math.floor(geo.hwPerRow / 2);
+  }), [true, true, true]);
+T("hardware fills outward from the host rather than left to right",
+  (() => {
+    const { geo } = geoAt(6); // 7 slots, host at 3
+    return [0, 1, 2, 3].map((i) => geo.hwSlot(i).col);
+  })(), [2, 4, 1, 5]);
+T("every hardware slot lands inside the canvas",
+  (() => {
+    const { geo } = geoAt(4);
+    return Array.from({ length: geo.hwPerRow }, (_, i) => geo.hwColX(geo.hwSlot(i).col)).every(
+      (x) => x >= 0 && x <= geo.width
+    );
+  })(), true);
+
+T("the graph's viewBox is as wide as the layout it holds",
+  (() => {
+    const card = newCard({ columns: 9 });
+    card._renderGraph();
+    return card._naturalViewBox.w;
+  })(), 2 * 110 + 8 * 200);
+
+// The grids under the tiers take their column count from the same width, so
+// widening the map spreads them too instead of leaving a ragged short row.
+T("the auto-grids widen with the canvas",
+  [__EXPORT.gridCols({ marginX: 80, spacingX: 112 }, 1220), __EXPORT.gridCols({ marginX: 80, spacingX: 112 }, 2020)],
+  [10, 17]);
+
+T("a tier smaller than the column count is not stretched across the whole width",
+  (() => {
+    // Four nodes in a twelve-column layout should stay four across.
+    const card = newCard({ columns: 12 });
+    card._derive();
+    const xs = card._derived.nodes.filter((n) => n.tier === "network").map((n) => n.x);
+    return xs.length <= 1 || Math.max(...xs) - Math.min(...xs) < card._geo().width - 2 * 110;
+  })(), true);
+
+// Rows used to stretch to the full canvas width whatever their length, so a
+// last row of three was spaced like a row of ten and no two rows lined up.
+T("every row in a tier lands on the same column positions",
+  (() => {
+    const card = newCard({ columns: 4 });
+    card._derive();
+    const xs = card._derived.nodes.filter((n) => n.tier === "services").map((n) => Math.round(n.x));
+    return new Set(xs).size <= 4;
+  })(), true);
+T("column spacing does not change with how many are in the row",
+  (() => {
+    const card = newCard({ columns: 4 });
+    card._derive();
+    const rows = new Map();
+    for (const n of card._derived.nodes.filter((x) => x.tier === "services"))
+      rows.set(n.y, [...(rows.get(n.y) || []), Math.round(n.x)]);
+    const gaps = [...rows.values()]
+      .map((xs) => xs.sort((a, b) => a - b))
+      .filter((xs) => xs.length > 1)
+      .flatMap((xs) => xs.slice(1).map((x, i) => x - xs[i]));
+    return new Set(gaps).size;
+  })(), 1);
 
 process.exit(all ? 0 : 1);

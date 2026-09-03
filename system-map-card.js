@@ -112,7 +112,7 @@
 // version in the console is always the version of the file that's running -
 // which is the first thing worth knowing when a dashboard misbehaves after
 // an update, and the quickest way to catch a stale browser cache.
-const VERSION = "1.10.0";
+const VERSION = "1.11.0";
 
 console.info(
   `%c SYSTEM-MAP-CARD %c v${VERSION} `,
@@ -129,6 +129,81 @@ const escapeHtml = (value) =>
     "'": "&#39;",
   }[c]));
 
+// --- export helpers --------------------------------------------------------
+// An exported SVG is a document on its own: nothing resolves the theme's
+// custom properties for it and nothing but the SVG's own rules apply.
+
+// Substitutes var() references, including nested ones and fallbacks that
+// carry parentheses of their own - rgba(0,0,0,.3) and var(--a, var(--b))
+// both defeat a regex that stops at the first ")".
+const resolveCssVars = (value, lookup, depth = 0) => {
+  if (depth > 8 || !value.includes("var(")) return value;
+  let out = "";
+  let i = 0;
+  for (;;) {
+    const at = value.indexOf("var(", i);
+    if (at === -1) return out + value.slice(i);
+    out += value.slice(i, at);
+    let open = 0;
+    let j = at + 3;
+    for (; j < value.length; j++) {
+      if (value[j] === "(") open++;
+      else if (value[j] === ")" && !--open) break;
+    }
+    const inner = value.slice(at + 4, j);
+    let split = -1;
+    for (let k = 0, nest = 0; k < inner.length; k++) {
+      if (inner[k] === "(") nest++;
+      else if (inner[k] === ")") nest--;
+      else if (inner[k] === "," && !nest) { split = k; break; }
+    }
+    const name = (split === -1 ? inner : inner.slice(0, split)).trim();
+    const fallback = split === -1 ? "" : inner.slice(split + 1).trim();
+    const got = (lookup(name) || "").trim();
+    out += got || resolveCssVars(fallback, lookup, depth + 1) || "#888";
+    i = j + 1;
+  }
+};
+
+// Every class name appearing anywhere in a subtree.
+const classesIn = (root) => {
+  const out = new Set();
+  for (const el of root.querySelectorAll("*"))
+    for (const name of (el.getAttribute("class") || "").split(/\s+/)) if (name) out.add(name);
+  return out;
+};
+
+const SVG_TAGS = new Set(
+  "svg g rect path text circle ellipse line polyline polygon image title defs clippath use tspan".split(" ")
+);
+
+// Keeps only the rules that can apply inside the exported SVG. The card's
+// stylesheet is mostly HTML - flexbox, padding, backgrounds, hover states -
+// and carrying it into the SVG means a pile of rules matching nothing plus a
+// few that match the wrong thing. Which classes are SVG classes is read off
+// the markup being exported rather than listed here, so a class added to the
+// graph is never left behind.
+const svgOnlyCss = (sheet, classes) => {
+  const kept = [];
+  for (const [, selector, body] of sheet.replace(/\/\*[\s\S]*?\*\//g, " ").matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    const usable = selector
+      .split(",")
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .filter((part) => {
+        const tags = part
+          .replace(/\.[\w-]+|#[\w-]+|\[[^\]]*\]|::?[\w-]+(\([^)]*\))?|[>+~*]/g, " ")
+          .split(/\s+/)
+          .filter(Boolean);
+        if (tags.some((tag) => !SVG_TAGS.has(tag.toLowerCase()))) return false;
+        return [...part.matchAll(/\.([\w-]+)/g)].every((m) => classes.has(m[1]));
+      });
+    if (usable.length) kept.push(`${usable.join(", ")} {${body.trim()}}`);
+  }
+  return kept.join("\n");
+};
+
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 const truncate = (s, n) => (s && s.length > n ? s.slice(0, n - 1) + "…" : s || "");
 
 // Material Design Icons path data (24x24 viewBox), fetched verbatim from
@@ -460,11 +535,16 @@ function formatNetwork(network) {
 // Grid layout for anything not placed in a tier above -
 // this is what keeps the map from ever "missing" something again as
 // add-ons come and go, without hand-placing coordinates for each one.
-const OTHER_GRID = { cols: 8, spacingX: 140, spacingY: 108, r: 30, marginX: 90, topPad: 55, bottomPad: 40 };
+const OTHER_GRID = { spacingX: 140, spacingY: 108, r: 30, marginX: 90, topPad: 55, bottomPad: 40 };
+// How many circles fit across the canvas at this grid's spacing. Derived
+// rather than configured: the grids should use whatever width the tier
+// layout above them was given, and a second knob for it would only be a way
+// to get the two out of step.
+const gridCols = (geom, width) => Math.max(1, Math.floor((width - 2 * geom.marginX) / geom.spacingX) + 1);
 // Deliberately denser than the add-on grid: there are roughly ten times as
 // many config entries as leftover add-ons, and at the add-on grid's spacing
 // they alone would stretch the map tall enough to make fit-to-view useless.
-const ENTRY_GRID = { cols: 10, spacingX: 112, spacingY: 84, r: 22, marginX: 80, topPad: 52, bottomPad: 40 };
+const ENTRY_GRID = { spacingX: 112, spacingY: 84, r: 22, marginX: 80, topPad: 52, bottomPad: 40 };
 const ENTRY_GRID_COLOR = "#5c6bc0"; // indigo - distinct from the four tiers and the add-on grid
 const GRID_START_Y = 1180; // first auto-grid sits below the curated layout
 
@@ -489,24 +569,47 @@ const cardSize = (n) => (n.kind === "host" ? { w: CARD_HOST_W, h: CARD_HOST_H } 
 const LAYOUT_ROW_H = 182; // a card plus breathing room
 const LAYOUT_TIER_GAP = 40;
 const LAYOUT_MARGIN_X = 110;
-const LAYOUT_MAX_PER_ROW = 6;
+const LAYOUT_COL_STEP = 200; // a 148-wide card plus the gap between columns
+const LAYOUT_DEFAULT_COLUMNS = 6;
+const LAYOUT_MIN_COLUMNS = 3;
+const LAYOUT_MAX_COLUMNS = 12;
 
-const HW_PER_ROW = 7;
 const HW_ROW_H = 182;
 const HW_MARGIN_X = 90;
-const HW_HOST_COL = 3; // the host keeps the middle of the first row
-const HW_COL_W = (1220 - 2 * HW_MARGIN_X) / (HW_PER_ROW - 1);
-// First-row devices fill outward from the host rather than left-to-right, so
-// a single dongle lands next to the host instead of at the far edge.
-const HW_ROW0_COLS = [2, 4, 1, 5, 0, 6];
-const hwColX = (col) => HW_MARGIN_X + col * HW_COL_W;
-// Slot 0..5 sit beside the host on row 0; everything after wraps into full
-// rows below it.
-const hwSlot = (i) =>
-  i < HW_ROW0_COLS.length
-    ? { row: 0, col: HW_ROW0_COLS[i] }
-    : { row: 1 + Math.floor((i - HW_ROW0_COLS.length) / HW_PER_ROW), col: (i - HW_ROW0_COLS.length) % HW_PER_ROW };
-const hwRowCount = (n) => (n <= HW_ROW0_COLS.length ? 1 : 1 + Math.ceil((n - HW_ROW0_COLS.length) / HW_PER_ROW));
+
+// The canvas is as wide as the column count needs it to be, rather than the
+// column count being squeezed into a fixed canvas - otherwise asking for more
+// columns just draws the same cards closer together until they overlap. A
+// wide dashboard can therefore be told to use its width.
+const layoutGeometry = (columns) => {
+  const cols = clamp(Math.round(columns) || LAYOUT_DEFAULT_COLUMNS, LAYOUT_MIN_COLUMNS, LAYOUT_MAX_COLUMNS);
+  const width = 2 * LAYOUT_MARGIN_X + (cols - 1) * LAYOUT_COL_STEP;
+  // One more slot than the service rows: the hardware row is a header, and
+  // an odd count keeps the host in the true middle of it.
+  const hwPerRow = cols + 1;
+  const hostCol = Math.floor(hwPerRow / 2);
+  // First-row devices fill outward from the host rather than left-to-right,
+  // so a single dongle lands next to the host, not at the far edge.
+  const row0 = [];
+  for (let d = 1; row0.length < hwPerRow - 1; d++) {
+    if (hostCol - d >= 0) row0.push(hostCol - d);
+    if (hostCol + d < hwPerRow && row0.length < hwPerRow - 1) row0.push(hostCol + d);
+  }
+  const hwColW = (width - 2 * HW_MARGIN_X) / (hwPerRow - 1);
+  return {
+    cols,
+    width,
+    hwPerRow,
+    hostCol,
+    hwColX: (col) => HW_MARGIN_X + col * hwColW,
+    // Slots beside the host on row 0; everything after wraps into full rows.
+    hwSlot: (i) =>
+      i < row0.length
+        ? { row: 0, col: row0[i] }
+        : { row: 1 + Math.floor((i - row0.length) / hwPerRow), col: (i - row0.length) % hwPerRow },
+    hwRowCount: (n) => (n <= row0.length ? 1 : 1 + Math.ceil((n - row0.length) / hwPerRow)),
+  };
+};
 
 // Every user-facing option, with its default. This object is the single
 // source of truth for the card's config: setConfig() spreads it, and the
@@ -515,6 +618,10 @@ const hwRowCount = (n) => (n <= HW_ROW0_COLS.length ? 1 : 1 + Math.ceil((n - HW_
 const DEFAULTS = {
   title: "System Map",
   graph_height: 480,
+  // Columns of service cards. The canvas widens to suit, so a landscape
+  // dashboard can be told to use its width instead of drawing a tall
+  // column of cards with empty margins either side.
+  columns: LAYOUT_DEFAULT_COLUMNS,
   refresh_interval: 60, // seconds; 0 disables background refresh
   hide_inactive: false,
   // Sections
@@ -554,6 +661,12 @@ const EDITOR_SCHEMA = [
     schema: [
       { name: "graph_height", selector: { number: { min: 240, max: 1600, step: 20, unit_of_measurement: "px", mode: "box" } } },
       { name: "refresh_interval", selector: { number: { min: 0, max: 3600, step: 10, unit_of_measurement: "s", mode: "box" } } },
+      {
+        name: "columns",
+        selector: {
+          number: { min: LAYOUT_MIN_COLUMNS, max: LAYOUT_MAX_COLUMNS, step: 1, mode: "slider" },
+        },
+      },
     ],
   },
   {
@@ -647,6 +760,7 @@ const EDITOR_SCHEMA = [
 const EDITOR_LABELS = {
   title: "Title",
   graph_height: "Map height",
+  columns: "Cards per row",
   refresh_interval: "Refresh every (0 = off)",
   hide_inactive: "Hide inactive by default",
   show_status_bar: "Status bar",
@@ -903,6 +1017,10 @@ class SystemMapCard extends HTMLElement {
     // highlight can land on a curated node, an auto-grid add-on, or an
     // auto-grid integration, and those three id spaces can collide.
     this._highlight = null;
+    // The node the user has selected, if any - a separate concept from the
+    // entity finder's highlight, since the two answer different questions
+    // and can be on at once.
+    this._focus = null;
     // key -> {x, y, r} for every node actually drawn, rebuilt on each graph
     // render. Used to pan the view onto a highlight, and to tell "highlighted
     // but off-screen" apart from "highlighted but filtered out of the map".
@@ -1052,6 +1170,13 @@ class SystemMapCard extends HTMLElement {
         .smc-edge { stroke: var(--divider-color, #999); stroke-width: 2; fill: none; transition: opacity 0.15s ease; }
         .smc-edge.dashed { stroke-dasharray: 5 4; opacity: 0.6; }
         .smc-edge.smc-dim { opacity: 0.08; }
+        /* A selected node's own connections. Colour rather than width alone:
+           at map scale a 2px line and a 3px line are the same line, and the
+           whole point is to pick these out of two dozen others. */
+        .smc-edge.smc-edge-hot { stroke: #ffca28; stroke-width: 3.5; opacity: 1; }
+        .smc-edge.dashed.smc-edge-hot { opacity: 1; }
+        .smc-edge-label.smc-dim { opacity: 0.15; }
+        .smc-edge-label.smc-edge-label-hot { fill: #ffca28; font-weight: 700; }
         /* paint-order draws the stroke behind the fill, giving each label a
            halo in the graph's own background colour - so where a label does
            end up crossing an edge line it stays readable. */
@@ -1159,6 +1284,7 @@ class SystemMapCard extends HTMLElement {
       if (ev.key !== "Escape") return;
       if (this._detailKey) this._closeDetail();
       if (this._highlight) this._clearHighlight();
+      this._clearFocus();
     });
 
     // Event delegation for clicks - listeners attached once here rather
@@ -1342,10 +1468,14 @@ class SystemMapCard extends HTMLElement {
   // export is the bit that didn't fit on screen. Inlines the computed colours
   // for the handful of CSS custom properties the SVG references, since a
   // detached <img> resolves none of the theme's variables.
-  async _exportPng() {
+  // Builds the standalone SVG the export rasterises: the *whole* map rather
+  // than the current viewport, with everything a detached <img> cannot fetch
+  // or resolve for itself folded in. Split out from the export so it can be
+  // rendered and inspected without a browser download.
+  async _exportSvg() {
     const svg = this.querySelector(".smc-graph svg");
     const nat = this._naturalViewBox;
-    if (!svg || !nat) return;
+    if (!svg || !nat) return null;
     const clone = svg.cloneNode(true);
 
     // An SVG rendered through an <img> fetches nothing external, so the
@@ -1374,27 +1504,46 @@ class SystemMapCard extends HTMLElement {
     clone.setAttribute("viewBox", `${nat.x} ${nat.y} ${nat.w} ${nat.h}`);
     clone.setAttribute("width", nat.w);
     clone.setAttribute("height", nat.h);
+    clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
 
     const styles = getComputedStyle(this);
-    const resolve = (value) =>
-      String(value).replace(/var\(\s*(--[\w-]+)\s*(?:,\s*([^)]+))?\)/g, (_, name, fallback) =>
-        (styles.getPropertyValue(name) || fallback || "#888").trim()
-      );
+    // Nothing outside the file styles it once it is a document of its own,
+    // and SVG's default font is a serif - which is most of what "the export
+    // looks wrong" turns out to be. The dashboard's font is inherited rather
+    // than declared, so it has to be read off the live card and written in.
+    clone.setAttribute(
+      "style",
+      `font-family: ${styles.fontFamily || "sans-serif"}; ${clone.getAttribute("style") || ""}`.trim()
+    );
+    const resolve = (value) => resolveCssVars(String(value), (name) => styles.getPropertyValue(name));
     for (const el of clone.querySelectorAll("*")) {
       for (const attr of ["fill", "stroke", "style"]) {
         const value = el.getAttribute(attr);
         if (value && value.includes("var(")) el.setAttribute(attr, resolve(value));
       }
     }
+    // Only the rules that can apply inside the SVG. The card's stylesheet is
+    // mostly HTML - flexbox, padding, backgrounds - and none of it means
+    // anything here, while `.smc-graph svg { width:100% }` and the like are
+    // actively wrong once the SVG is the whole document.
+    const sheet = this.querySelector("style")?.textContent || "";
     clone.insertBefore(
       Object.assign(document.createElementNS("http://www.w3.org/2000/svg", "style"), {
-        textContent: resolve(this.querySelector("style")?.textContent || ""),
+        textContent: resolve(svgOnlyCss(sheet, classesIn(clone))),
       }),
       clone.firstChild
     );
+    return new XMLSerializer().serializeToString(clone);
+  }
 
-    const blob = new Blob([new XMLSerializer().serializeToString(clone)], { type: "image/svg+xml;charset=utf-8" });
+  async _exportPng() {
+    const nat = this._naturalViewBox;
+    const markup = await this._exportSvg();
+    if (!markup) return;
+
+    const blob = new Blob([markup], { type: "image/svg+xml;charset=utf-8" });
     const url = URL.createObjectURL(blob);
+    const styles = getComputedStyle(this);
     const img = new Image();
     img.onload = () => {
       const scale = 2; // readable node labels at the sizes this map runs to
@@ -1411,13 +1560,13 @@ class SystemMapCard extends HTMLElement {
       // where the "unnamed file" comes from: several browsers - the Home
       // Assistant companion app's webview among them - ignore the download
       // attribute in that case and save the blob under a generated name.
-      canvas.toBlob((blob) => {
-        if (!blob) {
+      canvas.toBlob((out) => {
+        if (!out) {
           this._loadErrors.export = "the browser could not encode the image";
           this._renderErrors();
           return;
         }
-        const href = URL.createObjectURL(blob);
+        const href = URL.createObjectURL(out);
         const link = document.createElement("a");
         link.download = `system-map-${new Date().toISOString().slice(0, 10)}.png`;
         link.href = href;
@@ -1719,6 +1868,7 @@ class SystemMapCard extends HTMLElement {
 
   _clearHighlight(clearResultText = true) {
     this._highlight = null;
+    this._focus = null;
     const resultEl = this.querySelector(".smc-entity-result");
     if (clearResultText && resultEl) resultEl.textContent = "";
     this._renderHighlightables();
@@ -2370,6 +2520,14 @@ class SystemMapCard extends HTMLElement {
   // however many hardware rows this instance actually needs. Nothing else in
   // the card reads the raw lists directly, so a discovered device is a
   // first-class node everywhere - edges, highlights, detail, the lot.
+  // The layout geometry this card's config asks for. Cached against the
+  // column count so a render doesn't rebuild it for every node.
+  _geo() {
+    const columns = this._config?.columns || LAYOUT_DEFAULT_COLUMNS;
+    if (this._geoCache?.asked !== columns) this._geoCache = { asked: columns, geo: layoutGeometry(columns) };
+    return this._geoCache.geo;
+  }
+
   _layout() {
     const shown = new Set(this._config.tiers);
     return this._derived.nodes.filter((n) => shown.has(n.tier));
@@ -2654,6 +2812,7 @@ class SystemMapCard extends HTMLElement {
   // the standard barycentre trick for keeping edges from crossing. Ties keep
   // the input order, so the map doesn't reshuffle between refreshes.
   _autoLayout(nodes, edges) {
+    const geo = this._geo();
     const byId = new Map(nodes.map((n) => [n.id, n]));
     const neighbours = new Map();
     for (const [from, to] of edges) {
@@ -2665,11 +2824,11 @@ class SystemMapCard extends HTMLElement {
     const hardware = nodes.filter((n) => n.tier === "hardware" && n.kind !== "host");
     const host = nodes.find((n) => n.kind === "host");
     if (host) {
-      host.x = hwColX(HW_HOST_COL);
+      host.x = geo.hwColX(geo.hostCol);
       host.y = 150;
     }
     // _deriveHardware already gave the discovered devices their slots.
-    let y = 150 + hwRowCount(hardware.length) * HW_ROW_H;
+    let y = 150 + geo.hwRowCount(hardware.length) * HW_ROW_H;
 
     const placedX = new Map(host ? [[host.id, host.x]] : []);
     for (const n of hardware) placedX.set(n.id, n.x);
@@ -2688,15 +2847,19 @@ class SystemMapCard extends HTMLElement {
         .sort((a, b) => a.b - b.b || a.i - b.i)
         .map((entry) => entry.n);
 
-      const perRow = Math.min(LAYOUT_MAX_PER_ROW, Math.max(3, Math.ceil(Math.sqrt(ordered.length * 1.7))));
+      // As many per row as the config asks for, or as many as there are.
+      // "Cards per row" should mean cards per row.
+      const perRow = Math.min(geo.cols, ordered.length);
       const rows = Math.ceil(ordered.length / perRow);
       y += LAYOUT_TIER_GAP;
+      // A fixed column step, with the whole block centred - rather than
+      // stretching each row to the full width, which spaced a row of three
+      // like a row of ten and left the columns unaligned between rows.
+      const left = (geo.width - (perRow - 1) * LAYOUT_COL_STEP) / 2;
       ordered.forEach((n, i) => {
         const row = Math.floor(i / perRow);
-        const inRow = Math.min(perRow, ordered.length - row * perRow);
         const col = i % perRow;
-        const span = 1220 - 2 * LAYOUT_MARGIN_X;
-        n.x = inRow === 1 ? 610 : LAYOUT_MARGIN_X + col * (span / (inRow - 1));
+        n.x = left + col * LAYOUT_COL_STEP;
         n.y = y + row * LAYOUT_ROW_H;
         placedX.set(n.id, n.x);
       });
@@ -2789,6 +2952,7 @@ class SystemMapCard extends HTMLElement {
   // add-on owns this dongle" is read off the configuration rather than
   // asserted by hand.
   _deriveHardware(addonNodes = []) {
+    const geo = this._geo();
     if (!this._config.discover_hardware || !this._hardware) return { nodes: [], edges: [] };
     const devices = Array.isArray(this._hardware.devices) ? this._hardware.devices : [];
     const drives = Array.isArray(this._hardware.drives) ? this._hardware.drives : [];
@@ -2831,8 +2995,8 @@ class SystemMapCard extends HTMLElement {
     const found = [...disks, ...serial];
     // Host first in the row, then the discovered devices around it.
     const nodes = found.map((h, i) => {
-      const { row, col } = hwSlot(i);
-      return { ...h, kind: "hardware", tier: "hardware", derived: true, r: 32, x: hwColX(col), y: 150 + row * HW_ROW_H };
+      const { row, col } = geo.hwSlot(i);
+      return { ...h, kind: "hardware", tier: "hardware", derived: true, r: 32, x: geo.hwColX(col), y: 150 + row * HW_ROW_H };
     });
 
     // Every discovered device is physically attached to the host, so that
@@ -3117,7 +3281,11 @@ class SystemMapCard extends HTMLElement {
       }
     }
     const visible = layout.filter((n) => !hidden.has(n.id));
-    const dimming = !!(this._highlight && this._highlight.size);
+    // Two independent reasons to single nodes out - the entity finder's
+    // answer, and the node the user selected. Either dims the rest.
+    const lit = this._litSet();
+    const focusId = this._focusNodeId();
+    const dimming = !!lit?.size;
 
     // Tier bounding boxes - computed from the actual visible node positions
     // + radii each render, so they stay correct without manual upkeep.
@@ -3153,16 +3321,30 @@ class SystemMapCard extends HTMLElement {
         const from = byId.get(fromId);
         const to = byId.get(toId);
         if (!from || !to) return "";
-        const edgeHi = !!(this._highlight?.has(`node:${fromId}`) && this._highlight?.has(`node:${toId}`));
-        const cls = "smc-edge" + (opts?.dashed ? " dashed" : "") + (dimming && !edgeHi ? " smc-dim" : "");
+        // An edge is *hot* when it is one of the selected node's own
+        // connections - drawn brightly, since it is the answer to the
+        // question. The finder instead lights edges whose two ends are both
+        // in its result, which is a different claim: not "these are joined"
+        // but "both of these serve the entity".
+        const hot = !!focusId && (fromId === focusId || toId === focusId);
+        const edgeHi = hot || !!(this._highlight?.has(`node:${fromId}`) && this._highlight?.has(`node:${toId}`));
+        const cls =
+          "smc-edge" +
+          (opts?.dashed ? " dashed" : "") +
+          (hot ? " smc-edge-hot" : "") +
+          (dimming && !edgeHi ? " smc-dim" : "");
         const line = `<line class="${cls}" x1="${from.x}" y1="${from.y}" x2="${to.x}" y2="${to.y}" />`;
-        if (opts?.label) edgeLabels.push({ text: opts.label, x: (from.x + to.x) / 2, y: (from.y + to.y) / 2 - 6 });
+        if (opts?.label)
+          edgeLabels.push({ text: opts.label, x: (from.x + to.x) / 2, y: (from.y + to.y) / 2 - 6, hot, dim: dimming && !edgeHi });
         return line;
       })
       .join("");
 
     const labelsSvg = this._placeEdgeLabels(edgeLabels, visible)
-      .map((l) => `<text class="smc-edge-label" x="${l.x}" y="${l.y}">${escapeHtml(l.text)}</text>`)
+      .map(
+        (l) =>
+          `<text class="smc-edge-label${l.hot ? " smc-edge-label-hot" : ""}${l.dim ? " smc-dim" : ""}" x="${l.x}" y="${l.y}">${escapeHtml(l.text)}</text>`
+      )
       .join("");
 
     const nodesSvg = visible
@@ -3173,7 +3355,7 @@ class SystemMapCard extends HTMLElement {
         const x0 = n.x - w / 2;
         const y0 = n.y - h / 2;
         this._nodePositions.set(`node:${n.id}`, { x: n.x, y: n.y, w, h, r: Math.max(w, h) / 2 });
-        const isHi = !!this._highlight?.has(`node:${n.id}`);
+        const isHi = !!lit?.has(`node:${n.id}`);
         const cls =
           "smc-node smc-card-node" +
           (n.kind === "internet" ? " smc-internet" : "") +
@@ -3268,7 +3450,7 @@ class SystemMapCard extends HTMLElement {
     const grids = [];
     let cursor = gridTop;
     const addGrid = (items, geom, color, label, dataAttr) => {
-      const section = this._gridSection({ items, startY: cursor, geom, color, label, dataAttr, dimming });
+      const section = this._gridSection({ items, startY: cursor, geom, color, label, dataAttr, dimming, lit });
       cursor += section.height;
       grids.push(section.svg);
     };
@@ -3292,7 +3474,7 @@ class SystemMapCard extends HTMLElement {
     const gridsSvg = grids.join("");
     const totalHeight = cursor > gridTop ? cursor : gridTop - 40;
 
-    const natural = { x: 0, y: 0, w: 1220, h: totalHeight };
+    const natural = { x: 0, y: 0, w: this._geo().width, h: totalHeight };
     this._naturalViewBox = natural;
     if (!this._viewBox) this._viewBox = { ...natural };
 
@@ -3388,9 +3570,10 @@ class SystemMapCard extends HTMLElement {
   // per item. Shared by the leftover-add-ons and the integrations grids so
   // both get identical highlight/dim behaviour and neither can drift.
   // Returns its own rendered height so the next section can stack under it.
-  _gridSection({ items, startY, geom, color, label, dataAttr, dimming }) {
+  _gridSection({ items, startY, geom, color, label, dataAttr, dimming, lit }) {
     if (!items.length) return { svg: "", height: 0 };
-    const { cols, spacingX, spacingY, r, marginX, topPad, bottomPad } = geom;
+    const { spacingX, spacingY, r, marginX, topPad, bottomPad } = geom;
+    const cols = gridCols(geom, this._geo().width);
     const positions = items.map((item, i) => ({
       item,
       x: marginX + (i % cols) * spacingX,
@@ -3410,7 +3593,7 @@ class SystemMapCard extends HTMLElement {
       .map(({ item, x, y }) => {
         const key = `${item.kind}:${item.key}`;
         this._nodePositions.set(key, { x, y, r });
-        const isHi = !!this._highlight?.has(key);
+        const isHi = !!lit?.has(key);
         const problem = this._problemFor(key);
         const cls =
           "smc-node smc-node-small" + (problem ? " smc-problem" : "") + (dimming ? (isHi ? " smc-hi" : " smc-dim") : "");
@@ -3436,12 +3619,13 @@ class SystemMapCard extends HTMLElement {
     const all = [...this._entries].sort((a, b) => (a.domain || "").localeCompare(b.domain || ""));
     const shown = this._hideInactive ? all.filter((e) => !isInactiveStatus(entryStatus(e))) : all;
     countEl.textContent = shown.length === all.length ? `(${all.length})` : `(${shown.length} of ${all.length})`;
-    const dimming = !!this._highlight?.size;
+    const lit = this._litSet();
+    const dimming = !!lit?.size;
     wrap.innerHTML = shown
       .map((e) => {
         const status = entryStatus(e);
         const label = e.title ? `${e.domain}: ${e.title}` : e.domain;
-        const isHi = !!this._highlight?.has(`entry:${e.entry_id}`);
+        const isHi = !!lit?.has(`entry:${e.entry_id}`);
         const cls = "smc-chip" + (dimming ? (isHi ? " smc-hi" : " smc-dim") : "");
         return `<span class="${cls}" data-chip="${escapeHtml(e.entry_id)}" data-chip-kind="entry">
           <span class="smc-dot" style="background:${colorFor(status)}"></span>${escapeHtml(label)}
@@ -3490,6 +3674,14 @@ class SystemMapCard extends HTMLElement {
 
   async _openDetail(kind, key) {
     this._detailKey = `${kind}:${key}`;
+    // Selecting a node also focuses it on the map: what a node connects to
+    // is the question the diagram exists to answer, and reading it off a
+    // thicket of identical grey lines is exactly the part that doesn't work.
+    const focus = `${kind}:${key}`;
+    if (focus !== this._focus) {
+      this._focus = focus;
+      this._renderHighlightables();
+    }
     // Opening a panel is the one moment its add-on's info and stats are
     // worth re-reading, so drop the cached copies for whichever add-on this
     // is - see the note in _refreshData about why they otherwise persist.
@@ -3504,6 +3696,43 @@ class SystemMapCard extends HTMLElement {
   _closeDetail() {
     this._detailKey = null;
     this.querySelector(".smc-detail").hidden = true;
+    this._clearFocus();
+  }
+
+  _clearFocus() {
+    if (!this._focus) return;
+    this._focus = null;
+    this._renderHighlightables();
+  }
+
+  // The node under focus and everything one hop from it. Neighbours stay lit
+  // rather than dimmed: "connected to what" is unanswerable if the far end
+  // of every highlighted edge is greyed out.
+  // What is currently singled out, whichever way it got that way. The
+  // finder's answer wins when both are live: it is the more specific claim.
+  _litSet() {
+    return this._highlight?.size ? this._highlight : this._focusSet();
+  }
+
+  // The selected node, but only while it is the thing being shown. When the
+  // finder is answering, its result owns the map - lighting the selection's
+  // edges on top of it would put two unrelated claims on screen at once.
+  _focusNodeId() {
+    if (this._highlight?.size) return null;
+    return this._focus?.startsWith("node:") ? this._focus.slice(5) : null;
+  }
+
+  _focusSet() {
+    if (!this._focus) return null;
+    const keys = new Set([this._focus]);
+    const id = this._focus.startsWith("node:") ? this._focus.slice(5) : null;
+    if (id) {
+      for (const [from, to] of this._edges()) {
+        if (from === id) keys.add(`node:${to}`);
+        else if (to === id) keys.add(`node:${from}`);
+      }
+    }
+    return keys;
   }
 
   async _fetchAddonInfo(slug) {
