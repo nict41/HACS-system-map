@@ -112,7 +112,7 @@
 // version in the console is always the version of the file that's running -
 // which is the first thing worth knowing when a dashboard misbehaves after
 // an update, and the quickest way to catch a stale browser cache.
-const VERSION = "1.14.2";
+const VERSION = "1.15.0";
 
 console.info(
   `%c SYSTEM-MAP-CARD %c v${VERSION} `,
@@ -314,6 +314,25 @@ const GROUP_SERVICES_MIN = 6;
 // They are logged once at startup, so the window has to be long enough to
 // still contain that line on a tunnel that has been up for a while.
 const LOG_SCAN_LINES = 20000;
+
+// Supervisor calls made while filling in add-on detail go out in small
+// batches rather than one at a time. A strict one-by-one walk over 40
+// add-ons is a visible wait before icons and exposure lines appear, and
+// firing all of them at once is what makes a Pi stall. Five in flight is
+// several times faster and still gentle.
+const ADDON_FETCH_BATCH = 5;
+
+// Applies fn to items, ADDON_FETCH_BATCH at a time. Checks alive() between
+// batches so a card removed mid-walk (dashboard switched) stops promptly;
+// returns false when it did. fn must not throw - a rejection would abandon
+// the rest of its batch.
+const inBatches = async (items, size, fn, alive = () => true) => {
+  for (let i = 0; i < items.length; i += size) {
+    if (!alive()) return false;
+    await Promise.all(items.slice(i, i + size).map(fn));
+  }
+  return alive();
+};
 
 // Folders holding Home Assistant's own configuration, another add-on's, or
 // the backups. An add-on that can write these can change how the system is
@@ -2237,15 +2256,11 @@ class SystemMapCard extends HTMLElement {
 
   // Ownership edges are derived by matching a discovered device path against
   // the add-on's own options, which means one /addons/<slug>/info per add-on.
-  // Sequential on purpose: 30-odd Supervisor calls fired at once is a visible
-  // stall on a Pi, and nothing is waiting on the result.
   async _loadAddonOptions() {
-    for (const addon of this._addons) {
-      if (!this.isConnected) return; // card removed mid-walk (dashboard switched)
-      if (this._addonInfoCache.has(addon.slug)) continue;
-      await this._fetchAddonInfo(addon.slug);
-    }
-    if (!this.isConnected) return;
+    const pending = this._addons.filter((a) => !this._addonInfoCache.has(a.slug));
+    const alive = () => this.isConnected;
+    // _fetchAddonInfo swallows its own errors, so no batch is abandoned.
+    if (!(await inBatches(pending, ADDON_FETCH_BATCH, (a) => this._fetchAddonInfo(a.slug), alive))) return;
     await this._loadAddonIcons();
     await this._loadRouteLogs();
     this._derive();
@@ -2266,20 +2281,24 @@ class SystemMapCard extends HTMLElement {
   // re-runs with every refresh, and any failure just leaves the derived icon
   // in place.
   async _loadAddonIcons() {
-    for (const addon of this._addons) {
-      if (!this.isConnected) return;
-      if (!addon.icon) continue; // the add-on ships no icon
-      try {
-        const res = await this._hass.connection.sendMessagePromise({
-          type: "auth/sign_path",
-          path: `/api/hassio/addons/${addon.slug}/icon`,
-          expires: 3600,
-        });
-        if (res?.path) this._addonIcons.set(addon.slug, res.path);
-      } catch (e) {
-        this._addonIcons.delete(addon.slug);
-      }
-    }
+    const shipped = this._addons.filter((a) => a.icon); // the rest ship no icon
+    await inBatches(
+      shipped,
+      ADDON_FETCH_BATCH,
+      async (addon) => {
+        try {
+          const res = await this._hass.connection.sendMessagePromise({
+            type: "auth/sign_path",
+            path: `/api/hassio/addons/${addon.slug}/icon`,
+            expires: 3600,
+          });
+          if (res?.path) this._addonIcons.set(addon.slug, res.path);
+        } catch (e) {
+          this._addonIcons.delete(addon.slug);
+        }
+      },
+      () => this.isConnected,
+    );
   }
 
   // Reads the log of any add-on holding a tunnel or proxy credential. That is

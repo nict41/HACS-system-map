@@ -8,6 +8,18 @@ was already there in a way an existing dashboard would notice.
 `VERSION` in `system-map-card.js` is the source of truth and CI refuses to
 publish a release whose tag doesn't match it.
 
+## [1.15.0] - 2026-09-03
+
+### Changed
+
+- Add-on detail now loads several add-ons at a time instead of strictly one
+  after another. The map is drawn before this pass finishes, so on a server
+  with dozens of add-ons the first view used to sit there with generic icons
+  and no exposure lines for an uncomfortably long time. Five requests in
+  flight is several times faster and still far from the flood that makes a
+  Pi stall. The walk still stops promptly if the dashboard is switched away
+  mid-load.
+
 ## [1.14.2] - 2026-09-03
 
 ### Fixed

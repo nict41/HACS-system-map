@@ -15,7 +15,7 @@ import vm from "node:vm";
 
 const src = fs.readFileSync("system-map-card.js", "utf8") +
   "\nglobalThis.__SMC = SystemMapCard;\nglobalThis.__EDITOR = SystemMapCardEditor;\n" +
-  "globalThis.__EXPORT = { chipWidth, layoutGeometry, worstStatus, SVG_PAINT_PROPS, categoriseService, mappedFolders };\n";
+  "globalThis.__EXPORT = { chipWidth, layoutGeometry, worstStatus, SVG_PAINT_PROPS, categoriseService, mappedFolders, inBatches, ADDON_FETCH_BATCH };\n";
 
 const makeEl = () => ({
   innerHTML: "", textContent: "", hidden: false, scrollTop: 0,
@@ -2065,5 +2065,39 @@ T("an add-on promoted to remote access drops its service category",
     const cf = card._derived.nodes.find((n) => n.slug === "9074a9fa_cloudflared");
     return [cf.tier, cf.category ?? null];
   })(), ["remote", null]);
+
+// Add-on detail used to be fetched strictly one at a time, which meant a
+// long blank-looking map on a server with dozens of add-ons.
+const { inBatches, ADDON_FETCH_BATCH } = __EXPORT;
+T("work is issued concurrently, up to the batch size",
+  await (async () => {
+    let live = 0, peak = 0, done = 0;
+    await inBatches([...Array(13).keys()], ADDON_FETCH_BATCH, async () => {
+      live++; peak = Math.max(peak, live);
+      await new Promise((r) => setTimeout(r, 1));
+      live--; done++;
+    });
+    return [peak, done];
+  })(), [ADDON_FETCH_BATCH, 13]);
+T("a card removed mid-walk stops between batches",
+  await (async () => {
+    let alive = true, seen = 0;
+    const ok = await inBatches([...Array(20).keys()], ADDON_FETCH_BATCH,
+      async () => { if (++seen >= ADDON_FETCH_BATCH) alive = false; }, () => alive);
+    return [seen, ok];
+  })(), [ADDON_FETCH_BATCH, false]);
+
+T("add-on info is fetched once per uncached add-on, in batches",
+  await (async () => {
+    const card = newCard();
+    const slugs = [];
+    card._fetchAddonInfo = async (slug) => { slugs.push(slug); card._addonInfoCache.set(slug, {}); };
+    card._loadAddonIcons = async () => {};
+    card._loadRouteLogs = async () => {};
+    card._addons = [...Array(13).keys()].map((i) => ({ slug: `a${i}`, name: `A${i}`, state: "started" }));
+    card._addonInfoCache.set("a0", {});
+    await card._loadAddonOptions();
+    return [slugs.includes("a0"), slugs.length === new Set(slugs).size, slugs.length];
+  })(), [false, true, 12]);
 
 process.exit(all ? 0 : 1);
