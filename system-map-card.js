@@ -112,7 +112,7 @@
 // version in the console is always the version of the file that's running -
 // which is the first thing worth knowing when a dashboard misbehaves after
 // an update, and the quickest way to catch a stale browser cache.
-const VERSION = "1.13.1";
+const VERSION = "1.13.2";
 
 console.info(
   `%c SYSTEM-MAP-CARD %c v${VERSION} `,
@@ -130,77 +130,75 @@ const escapeHtml = (value) =>
   }[c]));
 
 // --- export helpers --------------------------------------------------------
-// An exported SVG is a document on its own: nothing resolves the theme's
-// custom properties for it and nothing but the SVG's own rules apply.
+// An exported SVG is a document on its own: no stylesheet reaches it, nothing
+// resolves the theme's custom properties for it, and SVG's own defaults - a
+// serif font, black fill, text anchored at the start - are nothing like what
+// the card draws.
+//
+// This used to be handled by copying the card's rules into the file and
+// filtering out the ones that could not apply. That was the wrong shape: it
+// made the export depend on parsing CSS correctly, and every way the parse
+// could be wrong - a comment glued to a selector, a rule the filter judged
+// inapplicable, a var() nested past the regex - showed up as a picture that
+// looked nothing like the card, with no error anywhere. So instead of
+// re-deriving what the browser would paint, ask it what it *did* paint.
 
-// Substitutes var() references, including nested ones and fallbacks that
-// carry parentheses of their own - rgba(0,0,0,.3) and var(--a, var(--b))
-// both defeat a regex that stops at the first ")".
-const resolveCssVars = (value, lookup, depth = 0) => {
-  if (depth > 8 || !value.includes("var(")) return value;
-  let out = "";
-  let i = 0;
-  for (;;) {
-    const at = value.indexOf("var(", i);
-    if (at === -1) return out + value.slice(i);
-    out += value.slice(i, at);
-    let open = 0;
-    let j = at + 3;
-    for (; j < value.length; j++) {
-      if (value[j] === "(") open++;
-      else if (value[j] === ")" && !--open) break;
+// The properties that decide how an SVG element is drawn. Anything about
+// interaction (cursor, pointer-events, transitions) is left behind: a still
+// image has none of it.
+const SVG_PAINT_PROPS = [
+  "fill",
+  "fill-opacity",
+  "fill-rule",
+  "stroke",
+  "stroke-width",
+  "stroke-opacity",
+  "stroke-dasharray",
+  "stroke-linecap",
+  "stroke-linejoin",
+  "opacity",
+  "font-family",
+  "font-size",
+  "font-style",
+  "font-weight",
+  "letter-spacing",
+  "text-anchor",
+  "dominant-baseline",
+  "paint-order",
+];
+
+// Copies each live element's computed style onto its clone as presentation
+// attributes. `live` and `clone` must be the same tree - the clone comes from
+// cloneNode(true) - so the two walks stay in step index for index.
+const inlineComputedStyles = (live, clone) => {
+  const liveEls = [live, ...live.querySelectorAll("*")];
+  const cloneEls = [clone, ...clone.querySelectorAll("*")];
+  for (let i = 0; i < cloneEls.length && i < liveEls.length; i++) {
+    const computed = getComputedStyle(liveEls[i]);
+    const el = cloneEls[i];
+    for (const prop of SVG_PAINT_PROPS) {
+      const value = computed.getPropertyValue(prop);
+      // "none" is meaningful for fill and stroke and must be written out;
+      // everything else is only worth carrying when it has a value.
+      if (value && value !== "normal" && value !== "auto") el.setAttribute(prop, value);
     }
-    const inner = value.slice(at + 4, j);
-    let split = -1;
-    for (let k = 0, nest = 0; k < inner.length; k++) {
-      if (inner[k] === "(") nest++;
-      else if (inner[k] === ")") nest--;
-      else if (inner[k] === "," && !nest) { split = k; break; }
+    // text-transform restyles the glyphs, not the string, so it does not
+    // survive as an attribute - the tier labels came out in sentence case.
+    // Apply it to the text itself instead.
+    const transform = computed.getPropertyValue("text-transform");
+    if (el.tagName === "text" && transform && transform !== "none") {
+      const text = el.textContent || "";
+      el.textContent =
+        transform === "uppercase"
+          ? text.toUpperCase()
+          : transform === "lowercase"
+            ? text.toLowerCase()
+            : text.replace(/\b\w/g, (c) => c.toUpperCase());
     }
-    const name = (split === -1 ? inner : inner.slice(0, split)).trim();
-    const fallback = split === -1 ? "" : inner.slice(split + 1).trim();
-    const got = (lookup(name) || "").trim();
-    out += got || resolveCssVars(fallback, lookup, depth + 1) || "#888";
-    i = j + 1;
+    // Styling now travels in the attributes; a class attribute left behind
+    // only invites something downstream to try to restyle it.
+    el.removeAttribute("class");
   }
-};
-
-// Every class name appearing anywhere in a subtree.
-const classesIn = (root) => {
-  const out = new Set();
-  for (const el of root.querySelectorAll("*"))
-    for (const name of (el.getAttribute("class") || "").split(/\s+/)) if (name) out.add(name);
-  return out;
-};
-
-const SVG_TAGS = new Set(
-  "svg g rect path text circle ellipse line polyline polygon image title defs clippath use tspan".split(" ")
-);
-
-// Keeps only the rules that can apply inside the exported SVG. The card's
-// stylesheet is mostly HTML - flexbox, padding, backgrounds, hover states -
-// and carrying it into the SVG means a pile of rules matching nothing plus a
-// few that match the wrong thing. Which classes are SVG classes is read off
-// the markup being exported rather than listed here, so a class added to the
-// graph is never left behind.
-const svgOnlyCss = (sheet, classes) => {
-  const kept = [];
-  for (const [, selector, body] of sheet.replace(/\/\*[\s\S]*?\*\//g, " ").matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
-    const usable = selector
-      .split(",")
-      .map((part) => part.trim())
-      .filter(Boolean)
-      .filter((part) => {
-        const tags = part
-          .replace(/\.[\w-]+|#[\w-]+|\[[^\]]*\]|::?[\w-]+(\([^)]*\))?|[>+~*]/g, " ")
-          .split(/\s+/)
-          .filter(Boolean);
-        if (tags.some((tag) => !SVG_TAGS.has(tag.toLowerCase()))) return false;
-        return [...part.matchAll(/\.([\w-]+)/g)].every((m) => classes.has(m[1]));
-      });
-    if (usable.length) kept.push(`${usable.join(", ")} {${body.trim()}}`);
-  }
-  return kept.join("\n");
 };
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
@@ -1576,33 +1574,7 @@ class SystemMapCard extends HTMLElement {
     clone.setAttribute("height", nat.h);
     clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
 
-    const styles = getComputedStyle(this);
-    // Nothing outside the file styles it once it is a document of its own,
-    // and SVG's default font is a serif - which is most of what "the export
-    // looks wrong" turns out to be. The dashboard's font is inherited rather
-    // than declared, so it has to be read off the live card and written in.
-    clone.setAttribute(
-      "style",
-      `font-family: ${styles.fontFamily || "sans-serif"}; ${clone.getAttribute("style") || ""}`.trim()
-    );
-    const resolve = (value) => resolveCssVars(String(value), (name) => styles.getPropertyValue(name));
-    for (const el of clone.querySelectorAll("*")) {
-      for (const attr of ["fill", "stroke", "style"]) {
-        const value = el.getAttribute(attr);
-        if (value && value.includes("var(")) el.setAttribute(attr, resolve(value));
-      }
-    }
-    // Only the rules that can apply inside the SVG. The card's stylesheet is
-    // mostly HTML - flexbox, padding, backgrounds - and none of it means
-    // anything here, while `.smc-graph svg { width:100% }` and the like are
-    // actively wrong once the SVG is the whole document.
-    const sheet = this.querySelector("style")?.textContent || "";
-    clone.insertBefore(
-      Object.assign(document.createElementNS("http://www.w3.org/2000/svg", "style"), {
-        textContent: resolve(svgOnlyCss(sheet, classesIn(clone))),
-      }),
-      clone.firstChild
-    );
+    inlineComputedStyles(svg, clone);
     return new XMLSerializer().serializeToString(clone);
   }
 

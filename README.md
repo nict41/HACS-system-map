@@ -189,7 +189,7 @@ checked against `VERSION` and refused if the two disagree.
 ## Development
 
 ```
-node test/system-map-card.test.mjs      # 252 assertions, no dependencies
+node test/system-map-card.test.mjs      # 244 assertions, no dependencies
 ```
 
 No build step: the card is evaluated against a stubbed DOM, covering config

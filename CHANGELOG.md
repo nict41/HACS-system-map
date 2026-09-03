@@ -8,6 +8,35 @@ was already there in a way an existing dashboard would notice.
 `VERSION` in `system-map-card.js` is the source of truth and CI refuses to
 publish a release whose tag doesn't match it.
 
+## [1.13.2] - 2026-09-03
+
+### Fixed
+
+- **The PNG export still lost the card's styling**, and the previous two
+  attempts at this were fixing symptoms. The export worked by copying the
+  card's stylesheet into the exported file and filtering out the rules that
+  could not apply there - which made a correct picture depend on parsing CSS
+  correctly, in a hand-written regex, against a stylesheet that keeps
+  growing. Every way that parse could go wrong produced an image that looked
+  nothing like the card, with no error anywhere: labels in a serif, tier
+  names in sentence case, chip text invisible, node names anchored at the
+  start and running out sideways.
+
+  There is no stylesheet in the exported file any more. Each element's
+  computed style is read off the live map and written onto the export as
+  presentation attributes, so the file carries exactly what the browser
+  actually painted - no cascade to re-resolve, no theme variables to look
+  up, and nothing to parse. `text-transform`, which restyles glyphs rather
+  than the string and so cannot travel as an attribute, is applied to the
+  text itself.
+
+  The screenshot harness now compares the export against the live rendering
+  and fails if they disagree - every colour, size and anchor the map is drawn
+  with has to appear in the exported file. That check is the actual fix here:
+  the previous two rounds were verified by looking at a rendered picture,
+  which is exactly the kind of check that passes while the bug is still
+  there.
+
 ## [1.13.1] - 2026-09-03
 
 ### Fixed

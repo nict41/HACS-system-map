@@ -259,6 +259,44 @@ if (process.env.SMC_EXPORT) {
     const markup = await card._exportSvg();
     if (!markup) return { error: "the card produced no SVG to export" };
     const nat = card._naturalViewBox;
+
+    // Check the export against what the browser actually painted, rather
+    // than against how it looks to whoever is reading the PNG. Every earlier
+    // export bug was of one kind - some styling did not survive into the file
+    // - and every one of them was invisible until somebody stared at the
+    // image and noticed the font was wrong. These compare the two directly.
+    const live = card.querySelector(".smc-graph svg");
+    const complaints = [];
+    if (/<style/.test(markup))
+      complaints.push("the export still ships a stylesheet, so it can still lose one");
+
+    // Each distinct colour, size and anchor the live map is drawn with has to
+    // appear somewhere in the exported file. A dropped rule takes its values
+    // with it, which is exactly what this catches.
+    const want = new Map();
+    for (const el of live.querySelectorAll("text, rect, circle, line, path")) {
+      const cs = getComputedStyle(el);
+      for (const prop of ["fill", "stroke", "font-size", "text-anchor"]) {
+        const v = cs.getPropertyValue(prop);
+        if (v && v !== "none" && v !== "normal") want.set(`${prop}: ${v}`, (want.get(`${prop}: ${v}`) || 0) + 1);
+      }
+    }
+    for (const [decl, count] of want) {
+      const [prop, value] = decl.split(": ");
+      // Rare one-offs are not worth failing a build over; anything the map
+      // uses more than a handful of times is structural.
+      if (count < 4) continue;
+      if (!markup.includes(`${prop}="${value}"`)) complaints.push(`no element in the export has ${decl}`);
+    }
+
+    // text-transform restyles glyphs rather than the string, so it cannot
+    // travel as an attribute - the tier labels came out in sentence case.
+    for (const el of live.querySelectorAll("text")) {
+      if (getComputedStyle(el).textTransform !== "uppercase") continue;
+      const upper = (el.textContent || "").toUpperCase();
+      if (upper && !markup.includes(upper)) complaints.push(`"${el.textContent}" is not upper-cased in the export`);
+      break;
+    }
     const url = URL.createObjectURL(new Blob([markup], { type: "image/svg+xml;charset=utf-8" }));
     const png = await new Promise((resolve) => {
       const img = new Image();
@@ -275,8 +313,13 @@ if (process.env.SMC_EXPORT) {
       img.onerror = () => resolve(null);
       img.src = url;
     });
-    return { markup, png, nat };
+    return { markup, png, nat, complaints };
   });
+  if (exported.complaints?.length) {
+    console.error("The export does not match what the card drew:");
+    for (const c of exported.complaints) console.error(`  - ${c}`);
+    process.exitCode = 1;
+  }
   if (exported.error || !exported.png) {
     console.error(`Export failed: ${exported.error || "the browser refused to rasterise the map"}`);
     process.exitCode = 1;

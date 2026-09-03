@@ -15,7 +15,7 @@ import vm from "node:vm";
 
 const src = fs.readFileSync("system-map-card.js", "utf8") +
   "\nglobalThis.__SMC = SystemMapCard;\nglobalThis.__EDITOR = SystemMapCardEditor;\n" +
-  "globalThis.__EXPORT = { resolveCssVars, svgOnlyCss, chipWidth, layoutGeometry, worstStatus };\n";
+  "globalThis.__EXPORT = { chipWidth, layoutGeometry, worstStatus, SVG_PAINT_PROPS };\n";
 
 const makeEl = () => ({
   innerHTML: "", textContent: "", hidden: false, scrollTop: 0,
@@ -1343,50 +1343,20 @@ T("the finger lift that ends a pinch does not open a node's detail panel",
 
 
 // --- export ----------------------------------------------------------------
-// The export is a document of its own: nothing resolves the theme's custom
-// properties for it, nothing supplies a font, and only the SVG's own rules
-// apply. Each of those has been a way for the export to differ from the card
-// on screen while the card itself looked fine.
-const VARS = { "--primary-text-color": "#e1e1e1", "--card-background-color": "" };
-const look = (name) => VARS[name] ?? "";
-
-T("a plain var resolves to the theme's value", __EXPORT.resolveCssVars("var(--primary-text-color)", look), "#e1e1e1");
-T("an undefined var falls back", __EXPORT.resolveCssVars("var(--card-background-color, #fff)", look), "#fff");
-T("a fallback carrying its own parentheses survives",
-  __EXPORT.resolveCssVars("var(--card-background-color, rgba(0, 0, 0, 0.4))", look), "rgba(0, 0, 0, 0.4)");
-T("a var nested in a fallback resolves",
-  __EXPORT.resolveCssVars("var(--card-background-color, var(--primary-text-color))", look), "#e1e1e1");
-T("several vars in one value all resolve",
-  __EXPORT.resolveCssVars("1px solid var(--card-background-color, #333) var(--primary-text-color)", look),
-  "1px solid #333 #e1e1e1");
-T("an unresolvable var with no fallback still yields a colour",
-  __EXPORT.resolveCssVars("var(--nope)", look), "#888");
-
-const SHEET = `
-  .smc-stat { display: flex; padding: 6px 10px; }
-  .smc-card { fill: #1c1c1c; }
-  /* A comment above a rule, which is how most of them are written here. */
-  .smc-card-node .smc-host-pill { fill: #ffca28; }
-  .smc-gone { fill: red; }
-  ha-card { display: block; }
-`;
-const CLASSES = new Set(["smc-card", "smc-card-node", "smc-host-pill", "smc-stat"]);
-const filtered = __EXPORT.svgOnlyCss(SHEET, CLASSES);
-
-// The regression this exists for: a comment has no braces, so it was being
-// swallowed into the following rule's selector, and a selector full of
-// English words matches nothing. It cost the export its amber pills, its
-// dashed boundary and its edge-label halos, silently.
-T("a rule written under a comment is kept", filtered.includes("#ffca28"), true);
-T("a rule for a class the markup doesn't contain is dropped", filtered.includes("smc-gone"), false);
-T("an HTML element rule is dropped", filtered.includes("ha-card"), false);
-// The filter works on selectors, not properties: a class that really is in
-// the markup keeps its rule, and SVG ignores the properties that mean
-// nothing to it. Guessing at properties would be the fragile half.
-T("a rule is judged by its selector, not by whether its properties apply",
-  filtered.includes(".smc-stat"), true);
-T("the SVG rules are kept", filtered.includes(".smc-card {fill: #1c1c1c;}"), true);
-
+// The export used to carry the card's stylesheet into the file and filter out
+// the rules that could not apply there. That made a correct picture depend on
+// parsing CSS correctly, and every way the parse could go wrong showed up as
+// an image that looked nothing like the card, silently. The styles are read
+// off the live elements now, so there is nothing to parse and no stylesheet
+// for the file to depend on.
+T("the export carries the properties that decide how an SVG is drawn",
+  ["fill", "stroke", "stroke-width", "font-size", "font-family", "text-anchor", "opacity"].every((p) =>
+    __EXPORT.SVG_PAINT_PROPS.includes(p)
+  ), true);
+T("it does not carry interaction-only properties into a still image",
+  ["cursor", "pointer-events", "transition"].some((p) => __EXPORT.SVG_PAINT_PROPS.includes(p)), false);
+T("the export no longer builds a stylesheet at all",
+  /svgOnlyCss|resolveCssVars/.test(src), false);
 // --- selection focus -------------------------------------------------------
 // "What is this connected to" is the question a diagram exists to answer, and
 // it was unanswerable: selecting a node opened a panel and left two dozen
