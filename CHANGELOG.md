@@ -8,6 +8,30 @@ was already there in a way an existing dashboard would notice.
 `VERSION` in `system-map-card.js` is the source of truth and CI refuses to
 publish a release whose tag doesn't match it.
 
+## [1.14.2] - 2026-09-03
+
+### Fixed
+
+- **The card was reading the wrong hundred lines of a tunnel's log.** A
+  tunnel configured from its provider's dashboard logs its ingress rules
+  exactly once, when it starts, and the card asked Supervisor for the log
+  with no line count - so it got the default window, the tail. On a tunnel
+  that has been up for days those rules are far behind it. The read
+  succeeded, the log was healthy, and it simply did not contain the thing
+  being looked for: no routes, so no hostname pills on any card, no lines
+  from the tunnel to what it exposes, and no error anywhere to say why. The
+  route scan now asks for the whole retained journal, as a `Range` header so
+  the signed path stays exactly what was signed, falling back to the plain
+  request if the range is refused.
+- **A way in whose rules were never found now says so.** Nothing is drawn for
+  a route that does not exist, so the map was missing the hostnames and the
+  lines to them and looked like it had lost them rather than never having had
+  them. The Exposed pill reports it, with what to do about it.
+- **A tunnel no longer reports a service category.** It is decided while the
+  add-on is still in the services tier, and being a way in moves it out; the
+  leftover showed in the evidence panel as `kind: Other services` on
+  something the same row called `tier: remote`.
+
 ## [1.14.1] - 2026-09-03
 
 ### Fixed

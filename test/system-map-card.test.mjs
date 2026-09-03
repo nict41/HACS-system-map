@@ -1986,4 +1986,84 @@ T("hostnames that did reach something are reported plainly",
     return [item.tone, /could not be matched/.test(item.note)];
   })(), ["info", false]);
 
+// --- how much log to ask for -----------------------------------------------
+// The failure this exists for reports no error anywhere: the log reads fine,
+// it is simply the wrong hundred lines. A tunnel logs its ingress rules once
+// at startup, and Supervisor's default window is the tail - so on a tunnel
+// that has been up for days the rules are long past it, and the card sees a
+// healthy 14KB log with nothing it needs in it.
+T("a route scan asks for far more of the log than the default window",
+  await (async () => {
+    const card = newCard();
+    const asked = [];
+    card._hass = {
+      states: {},
+      connection: {
+        sendMessagePromise: async (m) => (m.type === "auth/sign_path" ? { path: "/signed" } : {}),
+      },
+    };
+    ctx.fetch = async (url, opts) => {
+      asked.push(opts?.headers?.Range || null);
+      return { ok: true, text: async () => "INF nothing here" };
+    };
+    await card._fetchAddonLog("a", 0, 20000);
+    return asked;
+  })(), ["entries=:-20000:"]);
+
+T("a Supervisor that rejects the range is retried without it, rather than failing",
+  await (async () => {
+    const card = newCard();
+    card._hass = {
+      states: {},
+      connection: { sendMessagePromise: async () => ({ path: "/signed" }) },
+    };
+    let call = 0;
+    ctx.fetch = async () => {
+      call++;
+      return call === 1 ? { ok: false, status: 416 } : { ok: true, text: async () => "second try worked" };
+    };
+    const text = await card._fetchAddonLog("a", 0, 20000);
+    return [call, text];
+  })(), [2, "second try worked"]);
+
+T("a detail-panel log tail asks for no range at all",
+  await (async () => {
+    const card = newCard();
+    card._hass = { states: {}, connection: { sendMessagePromise: async () => ({ path: "/signed" }) } };
+    const asked = [];
+    ctx.fetch = async (url, opts) => {
+      asked.push(opts?.headers?.Range || null);
+      return { ok: true, text: async () => "a\nb\nc" };
+    };
+    await card._fetchAddonLog("a");
+    return asked;
+  })(), [null]);
+
+// A way in whose rules were never found draws no hostnames and no lines, so
+// the map looks like it lost them rather than never having had them.
+T("a tunnel with no rules found says so in the status bar",
+  (() => {
+    const card = newCard();
+    card._routes = [];
+    card._tunnelSlugs = new Set(["9074a9fa_cloudflared"]);
+    const item = card._statusItems().find((i) => i.key === "exposed");
+    return [item?.value, item?.tone, /logs its rules once/.test(item?.note || "")];
+  })(), ["rules not found", "warn", true]);
+T("with no tunnel at all there is nothing to report",
+  (() => {
+    const card = newCard();
+    card._routes = [];
+    card._tunnelSlugs = new Set();
+    return card._statusItems().some((i) => i.key === "exposed");
+  })(), false);
+
+// Its category was decided while it was still a service, and it is not one.
+T("an add-on promoted to remote access drops its service category",
+  (() => {
+    const card = newCard();
+    card._derive();
+    const cf = card._derived.nodes.find((n) => n.slug === "9074a9fa_cloudflared");
+    return [cf.tier, cf.category ?? null];
+  })(), ["remote", null]);
+
 process.exit(all ? 0 : 1);

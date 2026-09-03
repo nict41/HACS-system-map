@@ -112,7 +112,7 @@
 // version in the console is always the version of the file that's running -
 // which is the first thing worth knowing when a dashboard misbehaves after
 // an update, and the quickest way to catch a stale browser cache.
-const VERSION = "1.14.1";
+const VERSION = "1.14.2";
 
 console.info(
   `%c SYSTEM-MAP-CARD %c v${VERSION} `,
@@ -310,6 +310,10 @@ const SERVICE_CATEGORIES = {
 const CATEGORY_ORDER = ["netsvc", "apps", "admin", "other"];
 // Below this many services in one box there is nothing to break up.
 const GROUP_SERVICES_MIN = 6;
+// How much of a log to ask for when hunting for a tunnel's ingress rules.
+// They are logged once at startup, so the window has to be long enough to
+// still contain that line on a tunnel that has been up for a while.
+const LOG_SCAN_LINES = 20000;
 
 // Folders holding Home Assistant's own configuration, another add-on's, or
 // the backups. An add-on that can write these can change how the system is
@@ -2290,7 +2294,7 @@ class SystemMapCard extends HTMLElement {
     this._tunnelSlugs = new Set();
 
     const scan = async (addon, why) => {
-      const log = await this._fetchAddonLog(addon.slug, 0);
+      const log = await this._fetchAddonLog(addon.slug, 0, LOG_SCAN_LINES);
       if (log === null) {
         this._logSizes.delete(addon.slug);
         this._routeScan.scanned.push(
@@ -2354,7 +2358,7 @@ class SystemMapCard extends HTMLElement {
     for (const addon of this._addons) {
       if (!this.isConnected) return;
       if (addon.state !== "started") continue;
-      const log = await this._fetchAddonLog(addon.slug, 0);
+      const log = await this._fetchAddonLog(addon.slug, 0, LOG_SCAN_LINES);
       this._logSizes.set(addon.slug, log ? log.length : 0);
       for (const target of servicesFromLog(log)) dialled.push({ ...target, fromSlug: addon.slug });
     }
@@ -2489,6 +2493,23 @@ class SystemMapCard extends HTMLElement {
     // The one number worth surfacing about the boundary: how much of this
     // instance is reachable from outside, and through what.
     const routes = this._routes || [];
+    if (!routes.length && this._tunnelSlugs?.size) {
+      // A way in whose rules were never found. Nothing is drawn for a route
+      // that does not exist, so without this the map is simply missing the
+      // hostnames and the lines to them, and looks like it has lost them
+      // rather than never having had them.
+      const names = [...this._tunnelSlugs].map((slug) => this._findAddon(slug)?.name || slug);
+      items.push({
+        key: "exposed",
+        label: "Exposed",
+        value: "rules not found",
+        tone: "warn",
+        note:
+          `${names.join(", ")} is a way in, but no hostname rules were found - so no service can be shown as exposed. ` +
+          `A tunnel configured from its provider's dashboard logs its rules once, when it starts, and they may have passed ` +
+          `out of the log window since. Restarting it re-logs them. The evidence panel shows what was read.`,
+      });
+    }
     if (routes.length) {
       const via = [...new Set(routes.map((r) => r.viaSlug).filter(Boolean))];
       const unmatched = routes.filter((r) => !r.targetId).length;
@@ -2971,6 +2992,11 @@ class SystemMapCard extends HTMLElement {
       const isWayIn = mine.length > 0 || this._tunnelSlugs?.has(node.slug);
       if (!isWayIn) continue;
       node.tier = "remote";
+      // Its service category was decided while it was still a service, and
+      // it is not one any more - a tunnel reading "kind: Other services" in
+      // the evidence panel is a leftover, not a finding.
+      delete node.category;
+      delete node.categoryWhy;
       if (mine.length) {
         node.routes = mine;
         node.notes.push(...mine.map((r) => `${r.hostname} → ${r.service}`));
@@ -4129,7 +4155,14 @@ class SystemMapCard extends HTMLElement {
   // about sixty bytes: the evidence panel reported "log read (60 bytes)",
   // the route parser found no rules in it, and the actual fault - that no
   // log had ever been read - was invisible.
-  async _fetchAddonLog(slug, lines = 25) {
+  // `want` is how many journal entries to ask Supervisor for. Its default
+  // window is the last hundred lines or so, and a tunnel logs its ingress
+  // rules exactly once, at startup - so on a tunnel that has been up for
+  // days those rules are long past the end of the default window, and the
+  // card reads a perfectly healthy log containing nothing it needs. That is
+  // not a failure any error can report: the read succeeds, and the rules
+  // simply are not in it.
+  async _fetchAddonLog(slug, lines = 25, want = 0) {
     const endpoint = `/api/hassio/addons/${slug}/logs`;
     let text = null;
     try {
@@ -4139,7 +4172,15 @@ class SystemMapCard extends HTMLElement {
         expires: 60,
       });
       if (!signed?.path) throw new Error("the log URL could not be signed");
-      const res = await fetch(signed.path);
+      // Journald's own range syntax, which is what this endpoint speaks.
+      // Sent as a header rather than a query parameter so the signed path
+      // stays exactly what was signed. A Supervisor that does not honour it
+      // answers with the default window, which is no worse than before; one
+      // that rejects the range outright is retried without it.
+      let res = want
+        ? await fetch(signed.path, { headers: { Range: `entries=:-${want}:` } }).catch(() => null)
+        : null;
+      if (!res || !res.ok) res = await fetch(signed.path);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       text = await res.text();
       this._logErrors.delete(slug);
