@@ -112,7 +112,7 @@
 // version in the console is always the version of the file that's running -
 // which is the first thing worth knowing when a dashboard misbehaves after
 // an update, and the quickest way to catch a stale browser cache.
-const VERSION = "1.14.0";
+const VERSION = "1.14.1";
 
 console.info(
   `%c SYSTEM-MAP-CARD %c v${VERSION} `,
@@ -1299,6 +1299,10 @@ class SystemMapCard extends HTMLElement {
         /* A selected node's own connections. Colour rather than width alone:
            at map scale a 2px line and a 3px line are the same line, and the
            whole point is to pick these out of two dozen others. */
+        /* A path in from the internet. Same amber as the hostname pill on the
+           far end and the boundary node itself, so "exposed" is one colour
+           wherever it appears. */
+        .smc-edge.smc-edge-exposed { stroke: #ffca28; stroke-width: 2.5; opacity: 0.85; }
         .smc-edge.smc-edge-hot { stroke: #ffca28; stroke-width: 3.5; opacity: 1; }
         .smc-edge.dashed.smc-edge-hot { opacity: 1; }
         .smc-edge-label.smc-dim { opacity: 0.15; }
@@ -2487,12 +2491,21 @@ class SystemMapCard extends HTMLElement {
     const routes = this._routes || [];
     if (routes.length) {
       const via = [...new Set(routes.map((r) => r.viaSlug).filter(Boolean))];
+      const unmatched = routes.filter((r) => !r.targetId).length;
       items.push({
         key: "exposed",
         label: "Exposed",
         value: `${routes.length} hostname${routes.length === 1 ? "" : "s"}`,
-        tone: "info",
-        note: `${routes.map((r) => r.hostname).join(", ")} - via ${via.join(", ")}`,
+        // Hostnames that reached nothing on this machine are the case where
+        // the map looks wrong - no pill on any card, no line from the tunnel
+        // - so the count says so rather than leaving it to be discovered by
+        // noticing an absence.
+        tone: routes.some((r) => r.targetId) ? "info" : "warn",
+        note:
+          `${routes.map((r) => r.hostname).join(", ")} - via ${via.join(", ")}` +
+          (unmatched
+            ? `. ${unmatched} of ${routes.length} could not be matched to anything on this machine - see the evidence panel for what each one pointed at.`
+            : ""),
       });
     }
 
@@ -3155,12 +3168,16 @@ class SystemMapCard extends HTMLElement {
     }
 
     // A tunnel's ingress rule is an edge from the way in to what it reaches.
-    // Deliberately unlabelled: the target node already wears the hostname, and
-    // printing it again along the edge just crowds the map with the same
-    // string twice - which reads as two different facts.
+    // Deliberately unlabelled: the target node already wears the hostname as
+    // its pill, and printing it again along the edge crowds the map with the
+    // same string twice - which reads as two different facts. Marked
+    // `exposes` instead, and drawn in the amber the pills and the Internet
+    // node use: as one more grey dashed line among thirty it was invisible,
+    // which left "what is reachable from outside" - the thing this card puts
+    // in a tier heading - unanswerable from the picture.
     for (const route of routes) {
       if (!route.viaId || !route.targetId || route.viaId === route.targetId) continue;
-      edges.push([route.viaId, route.targetId, { dashed: true }]);
+      edges.push([route.viaId, route.targetId, { dashed: true, exposes: true }]);
     }
 
     // An add-on that named another add-on's address in its log depends on
@@ -3578,6 +3595,7 @@ class SystemMapCard extends HTMLElement {
         const cls =
           "smc-edge" +
           (opts?.dashed ? " dashed" : "") +
+          (opts?.exposes ? " smc-edge-exposed" : "") +
           (hot ? " smc-edge-hot" : "") +
           (dimming && !edgeHi ? " smc-dim" : "");
         const line = `<line class="${cls}" x1="${from.x}" y1="${from.y}" x2="${to.x}" y2="${to.y}" />`;

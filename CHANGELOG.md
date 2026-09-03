@@ -8,6 +8,30 @@ was already there in a way an existing dashboard would notice.
 `VERSION` in `system-map-card.js` is the source of truth and CI refuses to
 publish a release whose tag doesn't match it.
 
+## [1.14.1] - 2026-09-03
+
+### Fixed
+
+- **A tunnel's lines to what it exposes were invisible.** They were drawn -
+  one edge per resolved route - but as grey dashed lines identical to the
+  thirty others on the map, which left "what is reachable from the internet"
+  unanswerable from the picture, in a card that puts that phrase in a tier
+  heading. They are now drawn in the same amber as the hostname pill on the
+  far end and the boundary node itself, so exposure is one colour wherever it
+  appears: an amber line from the tunnel, an amber pill on what it reaches.
+- **Hostnames that reached nothing were reported as a plain count.** When a
+  tunnel's rules parse but none of them match anything on this machine, no
+  pill and no line is drawn for them - so the map looks like the hostnames
+  were lost rather than unmatched. The Exposed pill now flags that case and
+  says how many, pointing at the evidence panel for what each one aimed at.
+
+### Verified
+
+- Nothing else has been lost since v1.9.0, where hostnames were last
+  confirmed working: the whole route pipeline is byte-identical, and the same
+  fixture rendered through both versions differs only in the integrations
+  grid's label, which was renamed on purpose in 1.12.0.
+
 ## [1.14.0] - 2026-09-03
 
 ### Added

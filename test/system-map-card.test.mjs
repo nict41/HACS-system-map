@@ -1925,4 +1925,65 @@ T("a node's panel says which kind it is and why",
     return [html.includes("Administration"), html.includes("Docker")];
   })(), [true, true]);
 
+// --- what is reachable from outside ----------------------------------------
+// Two halves of one claim: the service wears the hostname, and a line runs to
+// it from whatever exposes it. Both were drawn already, but the line was one
+// more grey dashed edge among thirty and could not be picked out - which
+// leaves "what is reachable from the internet", a thing this card puts in a
+// tier heading, unanswerable from the picture.
+const exposed = (() => {
+  const card = newCard();
+  card._renderGraph();
+  return { card, svg: card._els.get(".smc-graph").innerHTML };
+})();
+
+T("every resolved route has an edge from the tunnel to what it reaches",
+  exposed.card._routes
+    .filter((r) => r.targetId && r.viaId && r.viaId !== r.targetId)
+    .filter((r) => !exposed.card._derived.edges.some(([a, b]) => a === r.viaId && b === r.targetId))
+    .map((r) => r.hostname), []);
+T("those edges are marked out from every other line on the map",
+  (exposed.svg.match(/smc-edge-exposed/g) || []).length,
+  exposed.card._routes.filter((r) => r.targetId && r.viaId && r.viaId !== r.targetId).length);
+T("and are drawn in the same amber as the pill on the far end",
+  /\.smc-edge-exposed \{[^}]*#ffca28/.test(src), true);
+
+// The pill half of the same claim, asserted as a rule over every node rather
+// than for one add-on.
+T("every node with a hostname draws it as a pill",
+  (() => {
+    const withHost = exposed.card._derived.nodes.filter((n) => n.hostname);
+    return [
+      withHost.length > 0,
+      withHost.every((n) => exposed.svg.includes(`>${n.hostname}<`)),
+      (exposed.svg.match(/class="smc-host-pill"/g) || []).length === withHost.length,
+    ];
+  })(), [true, true, true]);
+T("a hostname is never drawn as a pill and a sub-line both",
+  exposed.card._derived.nodes
+    .filter((n) => n.hostname)
+    .filter((n) => (exposed.svg.match(new RegExp(`>${n.hostname.replace(/\./g, "\\.")}<`, "g")) || []).length !== 1)
+    .map((n) => n.label), []);
+
+// The failure mode that looks like "the card lost the hostnames": the rules
+// were read and parsed, but none of them matched anything on this machine.
+// Nothing is drawn for a route with no target, so the absence has to be
+// stated rather than left to be inferred from a map with no pills on it.
+T("hostnames that reached nothing are flagged, not reported as a plain count",
+  (() => {
+    const card = newCard();
+    card._routes = [
+      { hostname: "a.example.com", viaSlug: "cf", targetId: null },
+      { hostname: "b.example.com", viaSlug: "cf", targetId: null },
+    ];
+    const item = card._statusItems().find((i) => i.key === "exposed");
+    return [item.tone, item.value, /could not be matched/.test(item.note)];
+  })(), ["warn", "2 hostnames", true]);
+T("hostnames that did reach something are reported plainly",
+  (() => {
+    const card = newCard();
+    const item = card._statusItems().find((i) => i.key === "exposed");
+    return [item.tone, /could not be matched/.test(item.note)];
+  })(), ["info", false]);
+
 process.exit(all ? 0 : 1);
