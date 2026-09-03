@@ -157,19 +157,30 @@ const page = `<!doctype html><html><head><meta charset="utf-8"><style>
             // and Kiwix reach the same disk through that share. Fixtured this
             // way so the screenshot shows the republish chain, which is the
             // part of the derivation that is hardest to describe in words.
+            // The manifest fields are as close to the real add-ons' as the
+            // fixture can be: they are what the card reads to decide what
+            // kind of service each one is, so a fixture that leaves them out
+            // is a fixture that never exercises the decision.
             const ADDON_OPTIONS = {
-              "45df7312_zigbee2mqtt": { network: { "8099/tcp": 8099 }, options: { serial: { port: RESPONSES["/hardware/info"].devices[0].by_id }, mqtt: { server: "mqtt://core-mosquitto:1883" } } },
-              core_mosquitto: { network: { "1883/tcp": 1883, "8883/tcp": 8883 }, options: {} },
-              c9a35110_sambanas: { network: { "445/tcp": 445, "139/tcp": 139 }, options: { workgroup: "WORKGROUP", moredisks: ["NAS1"] } },
-              "3b88f413_immich": { network: { "3001/tcp": 8080 }, options: { external_library: "/media/NAS1/photos" } },
-              beb500c8_kiwix: { options: { zim_dir: "NAS1" } },
+              "45df7312_zigbee2mqtt": { network: { "8099/tcp": 8099 }, ingress: true, options: { serial: { port: RESPONSES["/hardware/info"].devices[0].by_id }, mqtt: { server: "mqtt://core-mosquitto:1883" } } },
+              core_mosquitto: { network: { "1883/tcp": 1883, "8883/tcp": 8883 }, services: ["mqtt:provide"], options: {} },
+              c9a35110_sambanas: { network: { "445/tcp": 445, "139/tcp": 139 }, map: ["config:rw", "addons:rw", "backup:rw", "share:rw", "ssl:ro"], options: { workgroup: "WORKGROUP", moredisks: ["NAS1"] } },
+              "3b88f413_immich": { network: { "3001/tcp": 8080 }, webui: "http://[HOST]:[PORT:3001]", options: { external_library: "/media/NAS1/photos" } },
+              beb500c8_immich_ml: { options: {} },
+              beb500c8_kiwix: { ingress: true, options: { zim_dir: "NAS1" } },
               a0d7b954_adguard: { network: { "53/tcp": 53, "3000/tcp": 3000 }, options: {} },
               a0d7b954_tailscale: { network: { "41641/udp": 41641 }, options: {} },
               // Remotely managed, so its options say nothing and the routes
               // are only in the log - the case the log parser exists for.
               "9074a9fa_cloudflared": { network: {}, options: { tunnel_token: "ey..." } },
-              beb500c8_wordpress: { network: { "80/tcp": 5051 }, options: {} },
-              beb500c8_pingvin_share: { network: { "3000/tcp": 8095 }, options: {} },
+              beb500c8_wordpress: { network: { "80/tcp": 5051 }, webui: "http://[HOST]:[PORT:80]", options: {} },
+              beb500c8_pingvin_share: { network: { "3000/tcp": 8095 }, ingress: true, options: {} },
+              beb500c8_nas1_usb_watcher: { options: {} },
+              "7b7df7b9_claudecode": { ingress: true, map: ["homeassistant_config:rw", "addons:rw"], options: {} },
+              core_ssh: { network: { "22/tcp": 22 }, ingress: true, full_access: true, hassio_role: "manager", options: {} },
+              core_configurator: { ingress: true, map: ["config:rw", "ssl:ro", "addons:rw"], options: {} },
+              a0d7b954_nodered: { ingress: true, hassio_role: "manager", map: ["config:rw"], options: {} },
+              core_mariadb: { network: { "3306/tcp": 3306 }, options: {} },
             };
             const name = (ADDONS.find((a) => a.slug === slug) || {}).name || slug;
             return { data: { name, state: "started", version: "1.4.2", options: {}, ...(ADDON_OPTIONS[slug] || {}) } };

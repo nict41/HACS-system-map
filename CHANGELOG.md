@@ -8,6 +8,45 @@ was already there in a way an existing dashboard would notice.
 `VERSION` in `system-map-card.js` is the source of truth and CI refuses to
 publish a release whose tag doesn't match it.
 
+## [1.14.0] - 2026-09-03
+
+### Added
+
+- **The services tier splits into what kind of service each one is.** It is
+  the honest default - an add-on lands there when its ports say nothing more
+  specific - so on a real system it ends up holding nearly everything, thirty
+  cards in one box. It now draws as up to four labelled boxes:
+
+  - **Network services** - other software connects to it: it publishes a
+    protocol the card recognises (SMB, MQTT, NFS, SQL, Redis, mDNS), or its
+    manifest offers a service to other add-ons.
+  - **Apps** - a person opens it: it has ingress, or publishes a web UI.
+  - **Administration** - it can change this system: the Supervisor
+    `manager`/`admin` role, the Docker API, full hardware access, the host
+    process list or D-Bus, a privileged capability, write access to Home
+    Assistant's own configuration, other add-ons' configuration or the
+    backups, or an SSH port.
+  - **Other services** - running, and the manifest says nothing more.
+
+  Every branch reads a field of the add-on's own manifest, so the answer is
+  the same on anyone's instance, and each node's panel and the evidence
+  panel both say which category it landed in and on what evidence.
+
+  Two orderings carry the weight. A file server has to map Home Assistant's
+  config folders in order to share them, so the protocol it serves decides
+  what it is, ahead of that folder access. SSH is the reverse - a protocol
+  whose purpose is administering the machine - so port 22 is administrative
+  evidence rather than a service offered. Read-only access to the
+  configuration is not administration either; add-ons ask to read it far more
+  often than to write it.
+
+  The split has to earn itself: four boxes holding one card each are worse
+  than one holding four. It applies only when there are at least six services
+  and at least two of the *named* categories have real membership - a split
+  into one real category plus "Other services" says almost nothing. The
+  sub-boxes keep the services colour, so the tier still reads as one tier.
+  `group_services: false` turns it off.
+
 ## [1.13.2] - 2026-09-03
 
 ### Fixed

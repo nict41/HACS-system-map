@@ -112,7 +112,7 @@
 // version in the console is always the version of the file that's running -
 // which is the first thing worth knowing when a dashboard misbehaves after
 // an update, and the quickest way to catch a stale browser cache.
-const VERSION = "1.13.2";
+const VERSION = "1.14.0";
 
 console.info(
   `%c SYSTEM-MAP-CARD %c v${VERSION} `,
@@ -251,6 +251,12 @@ const TIER_META = {
 };
 // Distinct hues per tier so the bounding boxes read as different sections
 // at a glance, not just "same grey box repeated four times".
+const groupLabel = (group) =>
+  group.startsWith("services:") ? SERVICE_CATEGORIES[group.slice(9)] || TIER_META.services : TIER_META[group];
+// Sub-groups keep the services colour: they are one tier subdivided, and
+// four unrelated hues would read as four tiers.
+const groupColor = (group) => TIER_COLORS[group.startsWith("services:") ? "services" : group];
+
 const TIER_COLORS = {
   hardware: "#42a5f5", // blue
   services: "#ab47bc", // purple
@@ -270,17 +276,99 @@ const PORT_ROLES = [
   { port: 51820, role: "WireGuard VPN", tier: "remote" },
   { port: 41641, role: "Tailscale", tier: "remote" },
   { port: 1194, role: "OpenVPN", tier: "remote" },
-  { port: 445, role: "SMB file server" },
-  { port: 139, role: "SMB file server" },
-  { port: 2049, role: "NFS server" },
-  { port: 1883, role: "MQTT broker" },
-  { port: 8883, role: "MQTT broker (TLS)" },
-  { port: 3306, role: "MySQL / MariaDB" },
-  { port: 5432, role: "PostgreSQL" },
-  { port: 6379, role: "Redis" },
-  { port: 22, role: "SSH" },
-  { port: 5353, role: "mDNS" },
+  // `kind` splits the protocols that other software connects to from the one
+  // whose whole purpose is administering the machine. SSH is not a service
+  // this system offers; it is how you go and change it.
+  { port: 445, role: "SMB file server", kind: "service" },
+  { port: 139, role: "SMB file server", kind: "service" },
+  { port: 2049, role: "NFS server", kind: "service" },
+  { port: 1883, role: "MQTT broker", kind: "service" },
+  { port: 8883, role: "MQTT broker (TLS)", kind: "service" },
+  { port: 3306, role: "MySQL / MariaDB", kind: "service" },
+  { port: 5432, role: "PostgreSQL", kind: "service" },
+  { port: 6379, role: "Redis", kind: "service" },
+  { port: 22, role: "SSH", kind: "admin" },
+  { port: 5353, role: "mDNS", kind: "service" },
 ];
+
+// --- what kind of service is this? -----------------------------------------
+// The services tier is the honest default - an add-on lands there when its
+// ports say nothing more specific - so on a real system it ends up holding
+// nearly everything, thirty-odd identical cards in one box. These split it,
+// and every branch cites a field of the add-on's own manifest rather than
+// knowing anything about particular add-ons, so the answer is the same on
+// anyone's instance and can be shown as evidence rather than asserted.
+
+const SERVICE_CATEGORIES = {
+  netsvc: "Network services",
+  apps: "Apps",
+  admin: "Administration",
+  other: "Other services",
+};
+// Top to bottom: what other things depend on, then what you use, then what
+// changes the system, then what we can't say anything about.
+const CATEGORY_ORDER = ["netsvc", "apps", "admin", "other"];
+// Below this many services in one box there is nothing to break up.
+const GROUP_SERVICES_MIN = 6;
+
+// Folders holding Home Assistant's own configuration, another add-on's, or
+// the backups. An add-on that can write these can change how the system is
+// set up. Deliberately not `addon_config` (its own directory), `ssl`,
+// `share` or `media`, which are just places to keep things.
+const ADMIN_FOLDERS = new Set(["config", "homeassistant_config", "addons", "all_addon_configs", "addon_configs", "backup"]);
+// The capabilities that amount to running as root on the host.
+const ADMIN_CAPS = new Set(["SYS_ADMIN", "SYS_RAWIO", "SYS_MODULE", "SYS_PTRACE", "DAC_READ_SEARCH"]);
+
+// `map` comes back as ["config:rw", ...] on older add-ons and as
+// [{type, read_only}, ...] on newer ones, and occasionally as an object
+// keyed by folder. All three mean the same thing.
+const mappedFolders = (info, writableOnly = false) => {
+  const raw = info?.map;
+  if (!raw) return [];
+  const list = Array.isArray(raw) ? raw : Object.entries(raw).map(([type, v]) => ({ type, ...(v || {}) }));
+  return list
+    .map((entry) => {
+      const object = entry && typeof entry === "object";
+      const text = String(object ? entry.type || "" : entry);
+      const [folder, mode] = text.split(":");
+      // Reading Home Assistant's configuration is not the same as being able
+      // to change it, and add-ons ask for one far more often than the other.
+      const readOnly = object ? entry.read_only === true : /^ro$/i.test(mode || "");
+      return { folder: folder.trim().toLowerCase(), readOnly };
+    })
+    .filter((e) => e.folder && (!writableOnly || !e.readOnly))
+    .map((e) => e.folder);
+};
+
+// Order matters here. A file server has to map Home Assistant's config
+// folders in order to share them, which would otherwise read as
+// "administration" - what it *is* is decided by the protocol it serves. SSH
+// is the reverse: a protocol that exists to administer the machine, so port
+// 22 counts as administrative evidence rather than as a service offered.
+const categoriseService = (info, ports = []) => {
+  const served = PORT_ROLES.filter((r) => r.kind === "service" && ports.includes(r.port));
+  if (served.length) return { category: "netsvc", why: `serves ${[...new Set(served.map((r) => r.role))].join(", ")}` };
+  if ((info?.services || []).some((entry) => /:provide/i.test(String(entry))))
+    return { category: "netsvc", why: "its manifest offers a service to other add-ons" };
+
+  const adminPorts = PORT_ROLES.filter((r) => r.kind === "admin" && ports.includes(r.port));
+  const folders = mappedFolders(info, true).filter((f) => ADMIN_FOLDERS.has(f));
+  const caps = (info?.privileged || []).map((c) => String(c).toUpperCase()).filter((c) => ADMIN_CAPS.has(c));
+  const why =
+    (adminPorts.length && `serves ${adminPorts.map((r) => r.role).join(", ")}`) ||
+    (/^(manager|admin)$/i.test(info?.hassio_role || "") && `holds the Supervisor "${info.hassio_role}" role`) ||
+    (info?.docker_api === true && "can drive the Docker API") ||
+    (info?.full_access === true && "runs with full hardware access") ||
+    (info?.host_pid === true && "shares the host's process list") ||
+    (info?.host_dbus === true && "can talk to the host over D-Bus") ||
+    (caps.length && `runs privileged (${caps.join(", ")})`) ||
+    (folders.length && `can write ${folders.join(", ")}`);
+  if (why) return { category: "admin", why };
+
+  if (info?.ingress === true) return { category: "apps", why: "opens in the sidebar through ingress" };
+  if (info?.webui) return { category: "apps", why: "publishes a web UI" };
+  return { category: "other", why: "no protocol, web UI or system access to go on" };
+};
 
 // An integration domain and the port of the service it talks to, so an
 // integration can be joined to whichever add-on actually serves it - the
@@ -663,6 +751,10 @@ const DEFAULTS = {
   show_sparklines: true, // host CPU/RAM history strip
   discover_hardware: true, // build the hardware tier from Supervisor's hardware/info
   group_by_area: false,
+  // Split the services tier into Apps / Network services / Administration,
+  // each from the add-on's own manifest. Ignored when there are too few
+  // services for the split to tell anyone anything.
+  group_services: true,
   scan_service_logs: false, // read every running add-on's log for services it dials
   show_debug: false, // the evidence panel: what the card saw, and what it concluded
   tiers: ["hardware", "services", "network", "remote"],
@@ -754,6 +846,7 @@ const EDITOR_SCHEMA = [
           { name: "show_counts", selector: { boolean: {} } },
           { name: "discover_hardware", selector: { boolean: {} } },
           { name: "group_by_area", selector: { boolean: {} } },
+          { name: "group_services", selector: { boolean: {} } },
           { name: "show_addon_stats", selector: { boolean: {} } },
           { name: "show_addon_logs", selector: { boolean: {} } },
           { name: "scan_service_logs", selector: { boolean: {} } },
@@ -799,6 +892,7 @@ const EDITOR_LABELS = {
   show_counts: "Device / entity counts",
   discover_hardware: "Discover hardware",
   group_by_area: "Group by area",
+  group_services: "Group services by kind",
   show_addon_stats: "Add-on CPU / RAM",
   show_addon_logs: "Add-on log tail",
   scan_service_logs: "Scan logs for service links (slow)",
@@ -2492,6 +2586,11 @@ class SystemMapCard extends HTMLElement {
         ports.length ? `ports <code>${esc(ports.join(", "))}</code>` : "no published ports",
         roles.length ? `roles <code>${esc(roles.join(", "))}</code>` : null,
         `tier <code>${esc(node?.tier || "not placed")}</code>`,
+        // The category is a claim about what an add-on is, so it says on
+        // whose evidence it was made rather than leaving it to be trusted.
+        node?.category
+          ? `kind <code>${esc(SERVICE_CATEGORIES[node.category] || node.category)}</code> - ${esc(node.categoryWhy || "")}`
+          : null,
         info ? `options <code>${esc(Object.keys(info.options || {}).join(", ") || "none")}</code>` : "options not read yet",
         info?.map ? `folders <code>${esc((Array.isArray(info.map) ? info.map : Object.keys(info.map)).join(", "))}</code>` : null,
         this._logErrors.has(addon.slug)
@@ -2778,7 +2877,10 @@ class SystemMapCard extends HTMLElement {
       // wherever it runs, and an address is more use than a blank line.
       const lanPort = [...hostPortsFor(info)].sort((a, b) => a - b)[0] || roles.find((r) => r.port)?.port;
       const address = this._primaryAddress();
+      const kind = tier === "services" ? categoriseService(info, ports) : null;
       return {
+        category: kind?.category,
+        categoryWhy: kind?.why,
         lan: lanPort ? `${address ? `${address}:` : ":"}${lanPort}` : null,
         id: `addon_${slugify(addon.slug)}`,
         kind: "addon",
@@ -2918,6 +3020,38 @@ class SystemMapCard extends HTMLElement {
   // average position of whatever it connects to in the tier above, which is
   // the standard barycentre trick for keeping edges from crossing. Ties keep
   // the input order, so the map doesn't reshuffle between refreshes.
+  // Which labelled box each node belongs in, and the order those boxes are
+  // stacked. Normally one box per tier; the services tier is split into its
+  // categories when doing so tells the reader something - which is not
+  // always. Four boxes holding one card each is worse than one holding four,
+  // so the split has to earn itself: enough services to be hard to scan, and
+  // at least two categories with real membership. Otherwise the tier is left
+  // whole, exactly as before.
+  _groupsFor(nodes) {
+    const services = nodes.filter((n) => n.tier === "services");
+    const counts = new Map();
+    for (const n of services) counts.set(n.category, (counts.get(n.category) || 0) + 1);
+    // "Other services" is the bucket for add-ons whose manifest says nothing
+    // useful, so a split into one real category plus that one has told the
+    // reader almost nothing. At least two categories that mean something
+    // have to be populated before the extra boxes are worth their space.
+    const informative = CATEGORY_ORDER.filter((c) => c !== "other" && (counts.get(c) || 0) >= 2);
+    const worthwhile =
+      this._config.group_services !== false && services.length >= GROUP_SERVICES_MIN && informative.length >= 2;
+
+    for (const n of nodes) n.group = worthwhile && n.tier === "services" ? `services:${n.category || "other"}` : n.tier;
+
+    const order = [];
+    for (const tier of TIER_ORDER) {
+      if (tier !== "services" || !worthwhile) {
+        order.push(tier);
+        continue;
+      }
+      for (const cat of CATEGORY_ORDER) if (counts.get(cat)) order.push(`services:${cat}`);
+    }
+    return order;
+  }
+
   _autoLayout(nodes, edges) {
     const geo = this._geo();
     const byId = new Map(nodes.map((n) => [n.id, n]));
@@ -2940,9 +3074,9 @@ class SystemMapCard extends HTMLElement {
     const placedX = new Map(host ? [[host.id, host.x]] : []);
     for (const n of hardware) placedX.set(n.id, n.x);
 
-    for (const tier of TIER_ORDER) {
-      if (tier === "hardware") continue;
-      const inTier = nodes.filter((n) => n.tier === tier);
+    for (const group of this._groupsFor(nodes)) {
+      if (group === "hardware") continue;
+      const inTier = nodes.filter((n) => n.group === group);
       if (!inTier.length) continue;
 
       const barycentre = (n) => {
@@ -3143,6 +3277,8 @@ class SystemMapCard extends HTMLElement {
           id: `share_${slugify(server.slug)}_${slugify(server.matched)}`,
           kind: "share",
           tier: "services",
+          category: "netsvc",
+          categoryWhy: "an SMB share is reached over the network by whatever mounts it",
           label: `${server.matched} (SMB)`,
           icon: "folder-network",
           r: 26,
@@ -3403,7 +3539,8 @@ class SystemMapCard extends HTMLElement {
     // lines might hang below a circle.
     const boxes = {};
     for (const n of visible) {
-      const b = boxes[n.tier] || (boxes[n.tier] = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
+      const key = n.group || n.tier;
+      const b = boxes[key] || (boxes[key] = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
       const { w, h } = cardSize(n);
       b.minX = Math.min(b.minX, n.x - w / 2 - 16);
       b.maxX = Math.max(b.maxX, n.x + w / 2 + 16);
@@ -3411,15 +3548,16 @@ class SystemMapCard extends HTMLElement {
       b.maxY = Math.max(b.maxY, n.y + h / 2 + 16);
     }
 
-    const boxesSvg = TIER_ORDER.filter((t) => boxes[t])
-      .map((t) => {
-        const b = boxes[t];
-        const color = TIER_COLORS[t];
+    const drawnGroups = this._groupsFor(layout).filter((g) => boxes[g]);
+    const boxesSvg = drawnGroups
+      .map((g) => {
+        const b = boxes[g];
+        const color = groupColor(g);
         return `<rect class="smc-tier-box" x="${b.minX}" y="${b.minY}" width="${b.maxX - b.minX}" height="${b.maxY - b.minY}" rx="14" style="fill:${color};fill-opacity:0.1;stroke:${color};stroke-opacity:0.55;" />`;
       })
       .join("");
-    const tierLabelsSvg = TIER_ORDER.filter((t) => boxes[t])
-      .map((t) => `<text class="smc-tier-label" x="${boxes[t].minX + 4}" y="${boxes[t].minY - 10}" style="fill:${TIER_COLORS[t]}">${escapeHtml(TIER_META[t])}</text>`)
+    const tierLabelsSvg = drawnGroups
+      .map((g) => `<text class="smc-tier-label" x="${boxes[g].minX + 4}" y="${boxes[g].minY - 10}" style="fill:${groupColor(g)}">${escapeHtml(groupLabel(g))}</text>`)
       .join("");
 
     const byId = new Map(layout.map((n) => [n.id, n]));
@@ -3453,11 +3591,11 @@ class SystemMapCard extends HTMLElement {
     // the boxes, so one landing on a box's top edge had that border drawn
     // straight through it - which reads as struck-through text, not as a
     // label crossing a line.
-    const boxEdges = TIER_ORDER.filter((t) => boxes[t]).flatMap((t) => {
-      const b = boxes[t];
+    const boxEdges = drawnGroups.flatMap((g) => {
+      const b = boxes[g];
       // 12px bold uppercase, averaged - it only has to be close enough to
-      // keep an edge label from being written across the tier's own name.
-      const labelW = TIER_META[t].length * 7.4;
+      // keep an edge label from being written across the box's own name.
+      const labelW = groupLabel(g).length * 7.4;
       return [
         { x0: b.minX, x1: b.maxX, y0: b.minY - 2, y1: b.minY + 2 },
         { x0: b.minX, x1: b.maxX, y0: b.maxY - 2, y1: b.maxY + 2 },
@@ -4183,6 +4321,18 @@ class SystemMapCard extends HTMLElement {
         rows.push(["State", entries[0].state], ["Source", entries[0].source]);
       }
     }
+
+    // Which box this node ended up in and on what evidence. Appended after
+    // the branches rather than inside them: several of them replace `rows`
+    // wholesale, so anything pushed earlier is thrown away. A claim about
+    // what an add-on *is* should be answerable by clicking it, not only from
+    // the evidence panel at the foot of the card.
+    const shown = kind === "node" ? this._node(key) : null;
+    if (shown?.category)
+      rows.push([
+        "Kind",
+        `${SERVICE_CATEGORIES[shown.category] || shown.category}${shown.categoryWhy ? ` - ${shown.categoryWhy}` : ""}`,
+      ]);
 
     // Problem / health / area detail applies to whichever node this is, so
     // it's appended once here rather than in each branch above.

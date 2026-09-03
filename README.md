@@ -106,6 +106,7 @@ editor (three-dot menu on the card -> Edit).
 | --- | --- | --- |
 | `title` | `System Map` | Card heading |
 | `graph_height` | `480` | Height of the map area, in pixels |
+| `group_services` | `true` | Split the services tier into Apps / Network services / Administration, from each add-on's own manifest |
 | `columns` | `6` | Service cards per row (3-12). The canvas widens to suit, so a wide dashboard can use its width |
 | `refresh_interval` | `60` | Seconds between background refreshes; `0` disables |
 | `hide_inactive` | `false` | Start with stopped/disabled things hidden |
@@ -189,7 +190,7 @@ checked against `VERSION` and refused if the two disagree.
 ## Development
 
 ```
-node test/system-map-card.test.mjs      # 244 assertions, no dependencies
+node test/system-map-card.test.mjs      # 266 assertions, no dependencies
 ```
 
 No build step: the card is evaluated against a stubbed DOM, covering config

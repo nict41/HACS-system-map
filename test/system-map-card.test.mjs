@@ -15,7 +15,7 @@ import vm from "node:vm";
 
 const src = fs.readFileSync("system-map-card.js", "utf8") +
   "\nglobalThis.__SMC = SystemMapCard;\nglobalThis.__EDITOR = SystemMapCardEditor;\n" +
-  "globalThis.__EXPORT = { chipWidth, layoutGeometry, worstStatus, SVG_PAINT_PROPS };\n";
+  "globalThis.__EXPORT = { chipWidth, layoutGeometry, worstStatus, SVG_PAINT_PROPS, categoriseService, mappedFolders };\n";
 
 const makeEl = () => ({
   innerHTML: "", textContent: "", hidden: false, scrollTop: 0,
@@ -1483,16 +1483,16 @@ T("a tier smaller than the column count is not stretched across the whole width"
 
 // Rows used to stretch to the full canvas width whatever their length, so a
 // last row of three was spaced like a row of ten and no two rows lined up.
-T("every row in a tier lands on the same column positions",
+T("every row in a box lands on the same column positions",
   (() => {
-    const card = newCard({ columns: 4 });
+    const card = newCard({ columns: 4, group_services: false });
     card._derive();
     const xs = card._derived.nodes.filter((n) => n.tier === "services").map((n) => Math.round(n.x));
     return new Set(xs).size <= 4;
   })(), true);
 T("column spacing does not change with how many are in the row",
   (() => {
-    const card = newCard({ columns: 4 });
+    const card = newCard({ columns: 4, group_services: false });
     card._derive();
     const rows = new Map();
     for (const n of card._derived.nodes.filter((x) => x.tier === "services"))
@@ -1778,5 +1778,151 @@ T("a label is moved off a tier's own name, not only off its outline",
       tiers.every((t) => Math.abs(e.y - t.y) > 12 || e.x + e.text.length * 3 < t.x || e.x - e.text.length * 3 > t.x + t.text.length * 7.4)
     );
   })(), true);
+
+// --- what kind of service is this ------------------------------------------
+// The services tier is the honest default, so on a real system it holds
+// nearly everything. Splitting it is only worth doing if the split is made
+// from the add-on's own manifest rather than from knowing the names of
+// particular add-ons - these pin the evidence each branch rests on.
+const cat = (info, ports = []) => __EXPORT.categoriseService(info, ports).category;
+
+T("an add-on serving a known protocol is a network service",
+  [cat({}, [445]), cat({}, [1883]), cat({}, [3306]), cat({}, [2049])],
+  ["netsvc", "netsvc", "netsvc", "netsvc"]);
+T("so is one whose manifest offers a service to other add-ons",
+  cat({ services: ["mqtt:provide"] }), "netsvc");
+T("but not one that merely needs a service", cat({ services: ["mqtt:need"] }), "other");
+
+// The precedence that matters: a file server has to map Home Assistant's
+// config folders in order to share them, and that must not make it read as
+// an administration tool.
+T("a file server is a network service, not an administrator, despite its folder access",
+  cat({ map: ["config:rw", "addons:rw", "backup:rw"] }, [445]), "netsvc");
+// SSH is the reverse - a protocol whose purpose is changing the machine.
+T("SSH counts as administration rather than as a service offered",
+  cat({}, [22]), "admin");
+
+T("system access of any kind is administration",
+  [
+    cat({ hassio_role: "manager" }),
+    cat({ hassio_role: "admin" }),
+    cat({ docker_api: true }),
+    cat({ full_access: true }),
+    cat({ host_pid: true }),
+    cat({ privileged: ["SYS_ADMIN"] }),
+    cat({ map: ["homeassistant_config:rw"] }),
+  ],
+  ["admin", "admin", "admin", "admin", "admin", "admin", "admin"]);
+T("the ordinary Supervisor roles are not administration",
+  [cat({ hassio_role: "default", ingress: true }), cat({ hassio_role: "homeassistant", ingress: true })],
+  ["apps", "apps"]);
+
+// An add-on's own config directory is not the system's configuration, and
+// the two differ by one character.
+T("mapping its own config directory is not system access",
+  cat({ map: ["addon_config:rw", "share:rw", "ssl:ro"], ingress: true }), "apps");
+// Reading Home Assistant's configuration is not the same as being able to
+// change it, and add-ons ask for the first far more often.
+T("read-only access to the system's configuration is not administration",
+  [cat({ map: ["config:ro"], ingress: true }), cat({ map: ["config:rw"], ingress: true })], ["apps", "admin"]);
+T("read-only is recognised in the object form too",
+  [
+    cat({ map: [{ type: "config", read_only: true }], ingress: true }),
+    cat({ map: [{ type: "config", read_only: false }], ingress: true }),
+  ], ["apps", "admin"]);
+T("folder mappings are read in all the shapes Supervisor returns them",
+  [
+    __EXPORT.mappedFolders({ map: ["config:rw", "share:ro"] }),
+    __EXPORT.mappedFolders({ map: [{ type: "config", read_only: false }] }),
+    __EXPORT.mappedFolders({ map: { config: {}, media: {} } }),
+    __EXPORT.mappedFolders({}),
+  ],
+  [["config", "share"], ["config"], ["config", "media"], []]);
+
+T("something a person opens is an app",
+  [cat({ ingress: true }), cat({ webui: "http://[HOST]:[PORT:8080]" })], ["apps", "apps"]);
+T("an add-on the manifest says nothing useful about is not guessed at",
+  cat({ name: "Some Sidecar" }), "other");
+T("every category carries the evidence it was decided on",
+  [
+    __EXPORT.categoriseService({}, [445]).why.includes("SMB"),
+    __EXPORT.categoriseService({ docker_api: true }).why.includes("Docker"),
+    __EXPORT.categoriseService({ ingress: true }).why.includes("ingress"),
+  ], [true, true, true]);
+
+// --- grouping the services tier --------------------------------------------
+// Four boxes holding one card each is worse than one holding four, so the
+// split has to earn itself.
+function groupedCard(extra = {}) {
+  const card = newCard(extra);
+  card._addons = [
+    { slug: "a_samba", name: "Samba NAS", state: "started" },
+    { slug: "a_mqtt", name: "Mosquitto", state: "started" },
+    { slug: "a_immich", name: "Immich", state: "started" },
+    { slug: "a_firefox", name: "Firefox", state: "started" },
+    { slug: "a_portainer", name: "Portainer", state: "started" },
+    { slug: "a_ssh", name: "Terminal & SSH", state: "started" },
+    { slug: "a_sidecar", name: "Immich ML", state: "started" },
+  ];
+  card._addonInfoCache = new Map([
+    ["a_samba", { name: "Samba NAS", network: { "445/tcp": 445 }, options: { workgroup: "WORKGROUP" }, map: ["config:rw"] }],
+    ["a_mqtt", { name: "Mosquitto", network: { "1883/tcp": 1883 }, options: {} }],
+    ["a_immich", { name: "Immich", network: { "3001/tcp": 8080 }, ingress: true, options: {} }],
+    ["a_firefox", { name: "Firefox", ingress: true, options: {} }],
+    ["a_portainer", { name: "Portainer", docker_api: true, ingress: true, options: {} }],
+    ["a_ssh", { name: "Terminal & SSH", network: { "22/tcp": 22 }, full_access: true, options: {} }],
+    ["a_sidecar", { name: "Immich ML", options: {} }],
+  ]);
+  card._derive();
+  return card;
+}
+const split = groupedCard();
+const groupOf = (slug) => split._derived.nodes.find((n) => n.slug === slug)?.group;
+
+T("the services tier splits into its categories",
+  [groupOf("a_samba"), groupOf("a_immich"), groupOf("a_portainer"), groupOf("a_sidecar")],
+  ["services:netsvc", "services:apps", "services:admin", "services:other"]);
+T("a split tier draws one labelled box per category",
+  (() => {
+    split._renderGraph();
+    const svg = split._els.get(".smc-graph").innerHTML;
+    return ["Network services", "Apps", "Administration"].every((l) => svg.includes(l));
+  })(), true);
+T("the boxes are stacked in a fixed order, so the map does not reshuffle",
+  (() => {
+    const y = (cat) =>
+      Math.min(...split._derived.nodes.filter((n) => n.group === `services:${cat}`).map((n) => n.y));
+    return y("netsvc") < y("apps") && y("apps") < y("admin") && y("admin") < y("other");
+  })(), true);
+
+T("too few services to be worth splitting are left as one box",
+  (() => {
+    const card = newCard(); // the base fixture has only a handful of services
+    card._derive();
+    return card._derived.nodes.filter((n) => n.tier === "services").every((n) => n.group === "services");
+  })(), true);
+T("a split can be turned off",
+  (() => {
+    const card = groupedCard({ group_services: false });
+    return card._derived.nodes.filter((n) => n.tier === "services").every((n) => n.group === "services");
+  })(), true);
+T("splitting changes which box a node is in, never which tier",
+  split._derived.nodes.filter((n) => n.group?.startsWith("services:")).every((n) => n.tier === "services"), true);
+T("the sub-boxes keep the tier's own colour, so it still reads as one tier",
+  (() => {
+    split._renderGraph();
+    const svg = split._els.get(".smc-graph").innerHTML;
+    const services = (svg.match(/fill:#ab47bc/g) || []).length;
+    return services >= 3;
+  })(), true);
+
+T("a node's panel says which kind it is and why",
+  await (async () => {
+    const card = groupedCard();
+    card._detailKey = `node:${card._derived.nodes.find((n) => n.slug === "a_portainer").id}`;
+    await card._renderDetail();
+    const html = card._els.get(".smc-detail").innerHTML;
+    return [html.includes("Administration"), html.includes("Docker")];
+  })(), [true, true]);
 
 process.exit(all ? 0 : 1);
