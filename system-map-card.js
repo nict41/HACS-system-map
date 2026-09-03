@@ -112,7 +112,7 @@
 // version in the console is always the version of the file that's running -
 // which is the first thing worth knowing when a dashboard misbehaves after
 // an update, and the quickest way to catch a stale browser cache.
-const VERSION = "1.13.0";
+const VERSION = "1.13.1";
 
 console.info(
   `%c SYSTEM-MAP-CARD %c v${VERSION} `,
@@ -3483,9 +3483,13 @@ class SystemMapCard extends HTMLElement {
     // label crossing a line.
     const boxEdges = TIER_ORDER.filter((t) => boxes[t]).flatMap((t) => {
       const b = boxes[t];
+      // 12px bold uppercase, averaged - it only has to be close enough to
+      // keep an edge label from being written across the tier's own name.
+      const labelW = TIER_META[t].length * 7.4;
       return [
         { x0: b.minX, x1: b.maxX, y0: b.minY - 2, y1: b.minY + 2 },
         { x0: b.minX, x1: b.maxX, y0: b.maxY - 2, y1: b.maxY + 2 },
+        { x0: b.minX, x1: b.minX + labelW, y0: b.minY - 22, y1: b.minY - 4 },
       ];
     });
     const labelsSvg = this._placeEdgeLabels(edgeLabels, visible, boxEdges)

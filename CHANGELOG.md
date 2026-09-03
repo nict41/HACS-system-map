@@ -8,6 +8,15 @@ was already there in a way an existing dashboard would notice.
 `VERSION` in `system-map-card.js` is the source of truth and CI refuses to
 publish a release whose tag doesn't match it.
 
+## [1.13.1] - 2026-09-03
+
+### Fixed
+
+- **An edge label could be written across a tier's own name.** The label
+  placer had been taught to avoid the tier outlines but not the labels
+  hanging above them, so "4 hostnames" landed on top of "REMOTE ACCESS /
+  ENTRY & EXIT POINTS".
+
 ## [1.13.0] - 2026-09-03
 
 Findings from a pass through the card as a user rather than as its author -

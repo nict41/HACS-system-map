@@ -1791,4 +1791,22 @@ T("selecting an entry in the list lights its integration on the map",
     return /class="[^"]*smc-hi[^"]*"[^>]*data-node-domain="localtuya"/.test(svg);
   })(), true);
 
+T("a label is moved off a tier's own name, not only off its outline",
+  (() => {
+    const card = newCard();
+    card._renderGraph();
+    const svg = card._els.get(".smc-graph").innerHTML;
+    // Every tier label and every edge label, as {x, y, text}. None of the
+    // edge labels may sit within a line's height of a tier label's baseline
+    // while overlapping it horizontally.
+    const grab = (cls) =>
+      [...svg.matchAll(new RegExp(`<text class="${cls}[^"]*" x="([-\\d.]+)" y="([-\\d.]+)"[^>]*>([^<]*)<`, "g"))].map(
+        (m) => ({ x: +m[1], y: +m[2], text: m[3] })
+      );
+    const tiers = grab("smc-tier-label");
+    return grab("smc-edge-label").every((e) =>
+      tiers.every((t) => Math.abs(e.y - t.y) > 12 || e.x + e.text.length * 3 < t.x || e.x - e.text.length * 3 > t.x + t.text.length * 7.4)
+    );
+  })(), true);
+
 process.exit(all ? 0 : 1);
