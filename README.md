@@ -28,7 +28,9 @@ outline and a count.
   each installed integration has a real node on the map
 - Zoom (mouse wheel, pinch, or on-screen buttons) and pan (drag with one
   finger, the mouse, or two fingers during a pinch); the map fits itself to
-  the view until you move it yourself
+  the view until you move it yourself, and never scrolls past its own edges
+- Keyboard accessible: nodes and chips are focusable and open with Enter or
+  Space, and carry accessible names
 - **Selecting a node lights its own connections** - its edges in amber with
   their labels picked out, its neighbours lit, everything else dimmed
 - Click any node for live detail: state, version, internal port, and (where
@@ -187,7 +189,7 @@ checked against `VERSION` and refused if the two disagree.
 ## Development
 
 ```
-node test/system-map-card.test.mjs      # 236 assertions, no dependencies
+node test/system-map-card.test.mjs      # 251 assertions, no dependencies
 ```
 
 No build step: the card is evaluated against a stubbed DOM, covering config

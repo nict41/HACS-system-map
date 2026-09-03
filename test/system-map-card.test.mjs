@@ -15,7 +15,7 @@ import vm from "node:vm";
 
 const src = fs.readFileSync("system-map-card.js", "utf8") +
   "\nglobalThis.__SMC = SystemMapCard;\nglobalThis.__EDITOR = SystemMapCardEditor;\n" +
-  "globalThis.__EXPORT = { resolveCssVars, svgOnlyCss, gridCols, layoutGeometry, worstStatus };\n";
+  "globalThis.__EXPORT = { resolveCssVars, svgOnlyCss, chipWidth, layoutGeometry, worstStatus };\n";
 
 const makeEl = () => ({
   innerHTML: "", textContent: "", hidden: false, scrollTop: 0,
@@ -41,8 +41,21 @@ const ctx = {
     addEventListener(type, fn) { (this._listeners ||= {})[type] = [...((this._listeners || {})[type] || []), fn]; }
   },
   customElements: { define: () => {} },
-  window: { customCards: [], addEventListener: () => {} },
-  document: { addEventListener: () => {}, createElement: () => makeEl(), createElementNS: () => makeEl() },
+  window: {
+    customCards: [],
+    _added: 0,
+    _removed: 0,
+    addEventListener() { this._added++; },
+    removeEventListener() { this._removed++; },
+  },
+  document: {
+    _added: 0,
+    _removed: 0,
+    addEventListener() { this._added++; },
+    removeEventListener() { this._removed++; },
+    createElement: () => makeEl(),
+    createElementNS: () => makeEl(),
+  },
   localStorage: { getItem: () => null, setItem: () => {} },
   URL: { createObjectURL: () => "", revokeObjectURL: () => {} },
 };
@@ -1256,23 +1269,44 @@ T("a pinch cannot zoom in past the close limit, or out past the whole map",
 T("one finger still pans, and does not pinch against itself",
   (() => {
     const { card, send } = pinchCard();
+    card._viewBox = { x: 100, y: 75, w: 200, h: 150 }; // zoomed in: there is something to pan
     send("pointerdown", 1, 200, 150);
     send("pointermove", 1, 150, 150);
     return [card._viewBox.w, card._viewBox.x];
-  })(), [400, 50]);
+  })(), [200, 125]);
+
+// A view already showing the whole map has nothing to scroll, and dragging
+// it used to slide the map off into empty space.
+T("panning a fully zoomed-out view moves nothing",
+  (() => {
+    const { card, send } = pinchCard();
+    send("pointerdown", 1, 200, 150);
+    send("pointermove", 1, 150, 150);
+    return [card._viewBox.x, card._viewBox.y];
+  })(), [0, 0]);
+
+T("panning stops at the edge of the map rather than scrolling past it",
+  (() => {
+    const { card, send } = pinchCard();
+    card._viewBox = { x: 100, y: 75, w: 200, h: 150 };
+    send("pointerdown", 1, 200, 150);
+    send("pointermove", 1, 2000, 150); // a long drag to the right
+    return card._viewBox.x;
+  })(), 0);
 
 // The drag in flight holds pointer capture and its own start position; left
 // running, it would pan the map against the pinch on every move.
 T("a second finger takes over from a drag already in progress",
   (() => {
     const { card, send } = pinchCard();
+    card._viewBox = { x: 100, y: 75, w: 200, h: 150 };
     send("pointerdown", 1, 100, 150);
     send("pointermove", 1, 60, 150); // past the drag threshold: now panning
     const panned = card._viewBox.x;
     send("pointerdown", 2, 300, 150);
     send("pointermove", 1, 10, 150);
     send("pointermove", 2, 350, 150);
-    return [panned !== 0, Math.round(card._viewBox.w) < 400];
+    return [panned !== 100, Math.round(card._viewBox.w) < 200];
   })(), [true, true]);
 
 // Lifting one finger must not hand the map to the other where that finger
@@ -1462,11 +1496,11 @@ T("the graph's viewBox is as wide as the layout it holds",
     return card._naturalViewBox.w;
   })(), 2 * 110 + 8 * 200);
 
-// The grids under the tiers take their column count from the same width, so
-// widening the map spreads them too instead of leaving a ragged short row.
-T("the auto-grids widen with the canvas",
-  [__EXPORT.gridCols({ marginX: 80, spacingX: 112 }, 1220), __EXPORT.gridCols({ marginX: 80, spacingX: 112 }, 2020)],
-  [10, 17]);
+// The grid chips size themselves to their labels, which is the whole point:
+// a fixed-radius circle truncated "utility_meter (3)" and let "systemmonitor"
+// spill over its own edge.
+T("a chip is wider for a longer label",
+  __EXPORT.chipWidth("utility_meter (3)") > __EXPORT.chipWidth("hue"), true);
 
 T("a tier smaller than the column count is not stretched across the whole width",
   (() => {
@@ -1632,5 +1666,129 @@ T("reset hands the view back to the card",
     card._resetView();
     return [card._viewMoved, card._viewBox.h === card._naturalViewBox.h];
   })(), [false, true]);
+
+// A label landing on a tier box's outline had that border drawn through it,
+// which reads as struck-through text rather than a label crossing a line.
+T("a label is moved off a tier outline, not just off the nodes",
+  (() => {
+    const card = newCard();
+    const border = { x0: 0, x1: 400, y0: 98, y1: 102 };
+    const [placed] = card._placeEdgeLabels([{ text: "mqtt.server", x: 200, y: 100 }], [], [border]);
+    return placed.y < border.y0 - 4 || placed.y > border.y1 + 4;
+  })(), true);
+T("without an obstacle the label still keeps its own midpoint",
+  (() => {
+    const card = newCard();
+    const [placed] = card._placeEdgeLabels([{ text: "mqtt.server", x: 200, y: 100 }], [], []);
+    return placed.y;
+  })(), 100);
+
+// --- listener lifetime -----------------------------------------------------
+// The visual editor calls setConfig on every keystroke and setConfig rebuilds
+// the card, so anything bound during a build was bound again per character.
+// Twenty keystrokes meant one click running _openDetail twenty times, each
+// with its own render and refetch - and twenty window listeners holding the
+// card alive for the life of the page.
+T("rebuilding the card does not stack up click handlers",
+  (() => {
+    const card = newCard();
+    card._hass = { states: {}, connection: { sendMessagePromise: async () => [], subscribeMessage: async () => () => {} } };
+    let opened = 0;
+    card._openDetail = () => { opened++; };
+    for (let i = 0; i < 5; i++) card._bindOnce();
+    const node = { closest: (sel) => (sel === "[data-node]" ? { getAttribute: () => "host" } : null) };
+    (card._listeners?.click || []).forEach((fn) => fn({ target: node }));
+    return opened;
+  })(), 1);
+
+T("a card removed from the page releases its global listeners",
+  (() => {
+    const card = newCard();
+    card._bindOnce();
+    const before = [ctx.window._removed || 0, ctx.document._removed || 0];
+    card.disconnectedCallback();
+    return [(ctx.window._removed || 0) - before[0], (ctx.document._removed || 0) - before[1]];
+  })(), [1, 1]);
+
+T("and takes them back when it returns to the page",
+  (() => {
+    const card = newCard();
+    card._bindOnce();
+    card.disconnectedCallback();
+    const before = [ctx.window._added || 0, ctx.document._added || 0];
+    card.connectedCallback();
+    return [(ctx.window._added || 0) - before[0], (ctx.document._added || 0) - before[1]];
+  })(), [1, 1]);
+
+// --- keyboard and screen readers -------------------------------------------
+// The map was mouse-and-touch only: every node, and the detail panel behind
+// it, was unreachable from a keyboard, and a screen reader was read a <title>
+// on an unfocusable <g>, which it never reaches.
+const a11y = (() => {
+  const card = newCard();
+  card._renderGraph();
+  return card._els.get(".smc-graph").innerHTML;
+})();
+T("every node is focusable and named",
+  (() => {
+    const groups = a11y.match(/<g class="smc-node[^>]*>/g) || [];
+    return [groups.length > 0, groups.every((g) => g.includes('tabindex="0"') && g.includes("aria-label="))];
+  })(), [true, true]);
+T("a node's accessible name carries its facts, not just its id",
+  /aria-label="[^"]*192\.168\.8\.25/.test(a11y), true);
+T("the icon-only controls have accessible names",
+  ["Refresh", "Zoom in", "Zoom out", "Fit to view", "Download as PNG"].every((l) => src.includes(`aria-label="${l}"`)),
+  true);
+T("Enter on a focused node opens it, exactly as a click does",
+  (() => {
+    const card = newCard();
+    card._bindOnce();
+    let opened = null;
+    card._openDetail = (kind, key) => { opened = [kind, key]; };
+    const target = { closest: (sel) => (sel.includes("data-node]") || sel === "[data-node]" ? { getAttribute: () => "host" } : null) };
+    (card._listeners?.keydown || []).forEach((fn) => fn({ key: "Enter", target, preventDefault() {} }));
+    return opened;
+  })(), ["node", "host"]);
+T("an ordinary key press on a node does nothing",
+  (() => {
+    const card = newCard();
+    card._bindOnce();
+    let opened = null;
+    card._openDetail = (kind, key) => { opened = [kind, key]; };
+    const target = { closest: () => ({ getAttribute: () => "host" }) };
+    (card._listeners?.keydown || []).forEach((fn) => fn({ key: "a", target, preventDefault() {} }));
+    return opened;
+  })(), null);
+
+// On a Core or Container install there is no Supervisor and so no network
+// info; the host node was left showing a bare ":8123", which is not an
+// address.
+T("with no host address the host node shows none, rather than a bare port",
+  (() => {
+    const card = newCard();
+    card._network = null;
+    card._system = { core: { port: 8123 } };
+    card._derive();
+    const host = card._derived.nodes.find((n) => n.kind === "host");
+    return host.lan;
+  })(), null);
+T("with an address it still shows address and port",
+  (() => {
+    const card = newCard();
+    card._derive();
+    return card._derived.nodes.find((n) => n.kind === "host").lan;
+  })(), "192.168.8.25:8123");
+
+// Selecting a config entry from the list below the map has to light its
+// integration up there: the entry itself is no longer a node, so focusing it
+// alone dimmed the entire map and lit nothing.
+T("selecting an entry in the list lights its integration on the map",
+  (() => {
+    const card = mergeCard();
+    card._openDetail("entry", "t2");
+    card._renderGraph();
+    const svg = card._els.get(".smc-graph").innerHTML;
+    return /class="[^"]*smc-hi[^"]*"[^>]*data-node-domain="localtuya"/.test(svg);
+  })(), true);
 
 process.exit(all ? 0 : 1);

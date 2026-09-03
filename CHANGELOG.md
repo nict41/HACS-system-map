@@ -8,6 +8,62 @@ was already there in a way an existing dashboard would notice.
 `VERSION` in `system-map-card.js` is the source of truth and CI refuses to
 publish a release whose tag doesn't match it.
 
+## [1.13.0] - 2026-09-03
+
+Findings from a pass through the card as a user rather than as its author -
+on a phone, on a Core install with no Supervisor, and with a real entity
+lookup driven end to end.
+
+### Added
+
+- **Keyboard and screen-reader access.** The map was mouse-and-touch only:
+  every node, and the detail panel behind it, was unreachable from a
+  keyboard, and a screen reader was offered a `<title>` on an unfocusable
+  `<g>` it could never land on. Nodes and chips are now focusable, named,
+  and activated by Enter or Space through the same handler as a click. The
+  icon-only buttons have accessible names rather than tooltips.
+
+### Changed
+
+- **The integration grid draws chips, not circles.** A fixed-radius circle
+  with the label written inside truncated `utility_meter (3)` and let
+  `systemmonitor` spill over its own edge. A chip sized to its own label has
+  neither problem, and the varying widths make the grid easier to scan.
+- **The legend moved out of the map.** As an overlay it covered the bottom of
+  the map, and on a narrow card it wrapped to four lines and hid half of it -
+  an overlay obscuring the thing it annotates.
+- **A map too tall for its space fits its width** instead of being shrunk to
+  fit entirely. Containing a map this tall in a phone's card renders the node
+  names at two or three pixels: technically the whole system, legibly
+  nothing. The threshold is the rendered label size, so a desktop card that
+  can show everything legibly still does.
+
+### Fixed
+
+- **Panning could scroll the map off-screen.** Nothing clamped the view to
+  the map's bounds, so looking up an entity near the bottom centred on the
+  answer and left the top half off-screen above a screenful of nothing. The
+  clamp is applied where every path meets, so the drag, the pinch, the wheel
+  and the finder all obey it.
+- **Editing the card in the visual editor leaked a listener set per
+  keystroke.** `setConfig` rebuilds the card and the editor calls it on every
+  character, so the window, document and card listeners were re-added each
+  time: twenty characters meant one click running the detail panel twenty
+  times, each with its own render and refetch, and twenty listeners holding
+  the card alive for the life of the page. They are bound once and released
+  when the card leaves the page.
+- **Selecting a config entry in the list dimmed the whole map and lit
+  nothing**, since entries are no longer drawn - their integration is. It
+  now lights the integration.
+- **A dead band of empty space sat between the last tier and the first
+  grid**, from stacking sections by summing paddings. They stack from the
+  previous box's real bottom edge, at the same gap the tiers use.
+- **Edge labels landing on a tier outline had that border drawn through
+  them**, which reads as struck-through text. The outlines are obstacles to
+  the label placer now, as the nodes already were.
+- **A Core or Container install showed the host as `:8123`.** With no
+  Supervisor there is no network info, and a bare port is not an address.
+
 ## [1.12.0] - 2026-09-03
 
 ### Changed

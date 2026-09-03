@@ -112,7 +112,7 @@
 // version in the console is always the version of the file that's running -
 // which is the first thing worth knowing when a dashboard misbehaves after
 // an update, and the quickest way to catch a stale browser cache.
-const VERSION = "1.12.0";
+const VERSION = "1.13.0";
 
 console.info(
   `%c SYSTEM-MAP-CARD %c v${VERSION} `,
@@ -546,16 +546,30 @@ function formatNetwork(network) {
 // Grid layout for anything not placed in a tier above -
 // this is what keeps the map from ever "missing" something again as
 // add-ons come and go, without hand-placing coordinates for each one.
-const OTHER_GRID = { spacingX: 140, spacingY: 108, r: 30, marginX: 90, topPad: 55, bottomPad: 40 };
-// How many circles fit across the canvas at this grid's spacing. Derived
-// rather than configured: the grids should use whatever width the tier
-// layout above them was given, and a second knob for it would only be a way
-// to get the two out of step.
-const gridCols = (geom, width) => Math.max(1, Math.floor((width - 2 * geom.marginX) / geom.spacingX) + 1);
+// Chip geometry for the auto-grids. A chip is sized to its own label, so
+// there is no column count to configure - they flow and wrap at the canvas
+// edge, whatever width the tier layout above them was given.
+// The vertical gap between one labelled box and the next, tiers and grids
+// alike, with room above each for its own label.
+// A node name is drawn at this size in user units; below about six device
+// pixels it is a grey smudge rather than a word, and that is the line
+// between "the whole map" being useful and being decorative.
+const CARD_NAME_PX = 12.5;
+const MIN_READABLE_PX = 6;
+const TIER_BOX_GAP = 46;
+const CHIP_H = 28;
+const CHIP_GAP = 10;
+const GRID_PAD = 16;
+// 11px at the dashboard's font, averaged. Only needs to be close: it decides
+// where a chip wraps, and a few pixels either way is a slightly ragged right
+// edge, not a broken layout.
+const CHIP_CHAR_W = 6.1;
+const chipWidth = (label) => Math.round(30 + String(label).length * CHIP_CHAR_W);
+const OTHER_GRID = { marginX: 90, rowH: 40 };
 // Deliberately denser than the add-on grid: there are roughly ten times as
 // many config entries as leftover add-ons, and at the add-on grid's spacing
 // they alone would stretch the map tall enough to make fit-to-view useless.
-const ENTRY_GRID = { spacingX: 112, spacingY: 84, r: 22, marginX: 80, topPad: 52, bottomPad: 40 };
+const ENTRY_GRID = { marginX: 80, rowH: 38 };
 const ENTRY_GRID_COLOR = "#5c6bc0"; // indigo - distinct from the four tiers and the add-on grid
 const GRID_START_Y = 1180; // first auto-grid sits below the curated layout
 
@@ -1124,7 +1138,7 @@ class SystemMapCard extends HTMLElement {
             Hide inactive
           </label>
           <span class="smc-version" title="System Map Card version">v${VERSION}</span>
-          <button class="smc-refresh" title="Refresh">&#8635;</button>
+          <button class="smc-refresh" title="Refresh" aria-label="Refresh">&#8635;</button>
         </div>
         <div class="smc-errors" hidden></div>
         ${cfg.show_status_bar ? `<div class="smc-status"></div>` : ""}
@@ -1133,13 +1147,13 @@ class SystemMapCard extends HTMLElement {
           <div class="smc-loading">Loading system map…</div>
           <div class="smc-graph"></div>
           <div class="smc-zoom-controls">
-            <button class="smc-zoom-in" title="Zoom in">+</button>
-            <button class="smc-zoom-out" title="Zoom out">&minus;</button>
-            <button class="smc-zoom-reset" title="Reset view">&#10021;</button>
-            <button class="smc-export" title="Download as PNG">&#8681;</button>
+            <button class="smc-zoom-in" title="Zoom in" aria-label="Zoom in">+</button>
+            <button class="smc-zoom-out" title="Zoom out" aria-label="Zoom out">&minus;</button>
+            <button class="smc-zoom-reset" title="Fit to view" aria-label="Fit to view">&#10021;</button>
+            <button class="smc-export" title="Download as PNG" aria-label="Download as PNG">&#8681;</button>
           </div>
-          ${cfg.show_legend ? `<div class="smc-legend"></div>` : ""}
         </div>
+        ${cfg.show_legend ? `<div class="smc-legend"></div>` : ""}
         <div class="smc-detail" hidden></div>
         ${cfg.show_entity_finder ? `<div class="smc-finder">
           <h3>Find an entity <span class="smc-hint">- highlights which node(s) serve it</span></h3>
@@ -1180,9 +1194,13 @@ class SystemMapCard extends HTMLElement {
         .smc-tier-label { font-size: 12px; font-weight: 700; letter-spacing: 0.4px; text-transform: uppercase; }
         .smc-badge { fill: #ffca28; font-size: 10px; font-weight: 700; text-anchor: middle; letter-spacing: 0.3px; }
         .smc-node circle { stroke: var(--card-background-color, #fff); stroke-width: 3; cursor: pointer; transition: opacity 0.15s ease; }
-        .smc-node-small text { fill: white; font-size: 9px; font-weight: 500; text-anchor: middle; pointer-events: none; }
+        .smc-chip-bg { fill: var(--card-background-color, #1c1c1c); stroke: var(--divider-color, #4a4a4a); stroke-width: 1; cursor: pointer; }
+        .smc-chip-node:hover .smc-chip-bg { stroke: var(--primary-color, #3f51b5); }
+        .smc-chip-text { fill: var(--primary-text-color); font-size: 11px; font-weight: 500; text-anchor: start; pointer-events: none; }
+        .smc-chip-dot { pointer-events: none; }
+        .smc-chip-node.smc-problem .smc-chip-bg { stroke: var(--error-color, #db4437); stroke-width: 2; }
+        .smc-chip-node.smc-hi .smc-chip-bg { stroke: #ffca28; stroke-width: 2.5; }
         .smc-node.smc-dim { opacity: 0.2; }
-        .smc-node-small.smc-hi circle { stroke: #ffca28; stroke-width: 5; }
         .smc-edge { stroke: var(--divider-color, #999); stroke-width: 2; fill: none; transition: opacity 0.15s ease; }
         .smc-edge.dashed { stroke-dasharray: 5 4; opacity: 0.6; }
         .smc-edge.smc-dim { opacity: 0.08; }
@@ -1240,10 +1258,9 @@ class SystemMapCard extends HTMLElement {
         .smc-stat-value { font-size: 1.15em; font-weight: 600; color: var(--primary-text-color); line-height: 1.3; }
         .smc-stat svg { display: block; width: 100%; height: 22px; overflow: visible; }
         .smc-stat path { fill: none; stroke: var(--primary-color, #3f51b5); stroke-width: 1.5; }
-        .smc-legend { position: absolute; left: 8px; bottom: 8px; z-index: 2; display: flex; flex-wrap: wrap; gap: 4px 10px; max-width: calc(100% - 60px); padding: 6px 8px; border-radius: 6px; background: var(--card-background-color, #fff); opacity: 0.92; font-size: 0.72em; color: var(--secondary-text-color); box-shadow: 0 1px 3px rgba(0,0,0,0.25); }
+        .smc-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; margin: 6px 2px 0; font-size: 0.72em; color: var(--secondary-text-color); flex: 0 0 auto; }
         .smc-legend span { display: inline-flex; align-items: center; gap: 4px; }
         .smc-legend i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
-        .smc-node-small.smc-problem circle { stroke: var(--error-color, #db4437); stroke-width: 4; }
         /* The boundary node gets a dashed ring: it isn't a thing running on
            this machine, it's where the machine stops. */
         .smc-card-node.smc-internet .smc-card { stroke: #ffa726; stroke-width: 2; stroke-dasharray: 7 4; }
@@ -1261,6 +1278,9 @@ class SystemMapCard extends HTMLElement {
         .smc-card-node .smc-host-pill-text { fill: #1b1b1b; font-size: 10.5px; font-weight: 700; text-anchor: middle; letter-spacing: 0.2px; pointer-events: none; }
         .smc-card-node.smc-problem .smc-card { stroke: var(--error-color, #db4437); stroke-width: 2; }
         .smc-card-node.smc-hi .smc-card { stroke: #ffca28; stroke-width: 3; }
+        .smc-node:focus { outline: none; }
+        .smc-node:focus-visible .smc-card, .smc-node:focus-visible .smc-chip-bg { stroke: var(--primary-color, #3f51b5); stroke-width: 3; }
+        .smc-chip:focus-visible { outline: 2px solid var(--primary-color, #3f51b5); outline-offset: 1px; }
         .smc-problem-badge { fill: var(--error-color, #db4437); font-size: 10px; font-weight: 700; text-anchor: middle; }
         .smc-detail-section { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--divider-color, #ddd); }
         .smc-detail-section h4 { margin: 0 0 4px; font-size: 0.85em; font-weight: 600; color: var(--secondary-text-color); }
@@ -1294,18 +1314,49 @@ class SystemMapCard extends HTMLElement {
 
     this._buildZoomPan();
     this._buildEntityFinder();
+    this._bindOnce();
+  }
 
-    // Escape closes whichever overlay is open - cheap, low-risk addition.
-    window.addEventListener("keydown", (ev) => {
+  // Listeners that outlive the markup: on the card element itself, which
+  // survives innerHTML being replaced, and on window/document, which survive
+  // everything. _build() re-runs on every setConfig - and the visual editor
+  // calls setConfig on every keystroke - so binding these there added a
+  // fresh set per character typed: twenty keystrokes meant one click firing
+  // _openDetail twenty times, each with its own render and refetch. They are
+  // bound once and released when the card leaves the page.
+  _bindOnce() {
+    if (this._bound) return;
+    this._bound = true;
+
+    // Event delegation, so re-rendering the graph never has to rewire.
+    this.addEventListener("click", (ev) => this._onCardClick(ev));
+
+    // Escape closes whichever overlay is open.
+    this._onKeyDown = (ev) => {
       if (ev.key !== "Escape") return;
       if (this._detailKey) this._closeDetail();
       if (this._highlight) this._clearHighlight();
       this._clearFocus();
+    };
+    window.addEventListener("keydown", this._onKeyDown);
+
+    // Enter/Space on a focused node does what clicking it does. Routed
+    // through the same handler so the two can never diverge.
+    this.addEventListener("keydown", (ev) => {
+      if (ev.key !== "Enter" && ev.key !== " ") return;
+      if (!ev.target?.closest?.("[data-node], [data-node-addon], [data-node-domain], [data-chip]")) return;
+      ev.preventDefault();
+      this._onCardClick(ev);
     });
 
-    // Event delegation for clicks - listeners attached once here rather
-    // than re-bound on every render.
-    this.addEventListener("click", (ev) => this._onCardClick(ev));
+    // Click-away closes the entity finder's suggestions.
+    this._onDocClick = (ev) => {
+      if (!this.contains(ev.target)) return;
+      if (ev.target.closest(".smc-entity-search, .smc-entity-suggestions")) return;
+      const el = this.querySelector(".smc-entity-suggestions");
+      if (el) el.hidden = true;
+    };
+    document.addEventListener("click", this._onDocClick);
   }
 
   // Delegated: one listener for the whole card, so re-rendering the graph
@@ -1606,14 +1657,25 @@ class SystemMapCard extends HTMLElement {
     img.src = url;
   }
 
+  // How far the view may be zoomed. Zooming out has to be able to reach the
+  // whole map, and for a map taller than the space it has that means a
+  // viewBox wider than the map itself - otherwise the fit-to-width default
+  // is also the furthest out you can ever get.
+  _zoomLimits() {
+    const nat = this._naturalViewBox;
+    const el = this.querySelector(".smc-graph");
+    const areaAspect = (el?.clientWidth || 0) / (el?.clientHeight || 1);
+    return { minW: nat.w * 0.12, maxW: Math.max(nat.w, areaAspect ? nat.h * areaAspect : 0) };
+  }
+
   _zoomBy(factor, cx, cy) {
     if (!this._viewBox || !this._naturalViewBox) return;
     this._viewMoved = true;
     const vb = this._viewBox;
-    const nat = this._naturalViewBox;
-    const aspect = nat.w / nat.h;
-    const minW = nat.w * 0.12;
-    const maxW = nat.w;
+    // The *current* view's aspect, not the map's: they differ as soon as the
+    // view is fitted to width, and zooming must not silently reshape it.
+    const aspect = vb.w / vb.h;
+    const { minW, maxW } = this._zoomLimits();
     const newW = Math.min(maxW, Math.max(minW, vb.w * factor));
     const newH = newW / aspect;
     const centerX = cx ?? vb.x + vb.w / 2;
@@ -1634,9 +1696,9 @@ class SystemMapCard extends HTMLElement {
   _pinchTo(pinch, dist, mid) {
     if (!this._viewBox || !this._naturalViewBox || !mid) return;
     const vb = this._viewBox;
-    const nat = this._naturalViewBox;
-    const newW = Math.min(nat.w, Math.max(nat.w * 0.12, pinch.vb.w * (pinch.dist / dist)));
-    const newH = newW / (nat.w / nat.h);
+    const { minW, maxW } = this._zoomLimits();
+    const newW = Math.min(maxW, Math.max(minW, pinch.vb.w * (pinch.dist / dist)));
+    const newH = newW / (pinch.vb.w / pinch.vb.h);
     // How far across the current view the midpoint sits. The viewBox aspect
     // never changes, so this fraction survives the resize unaltered and can
     // be reused to place the anchor in the new box.
@@ -1647,16 +1709,47 @@ class SystemMapCard extends HTMLElement {
     this._applyViewBox();
   }
 
+  // Show the whole map, which is the point of it - unless doing so would
+  // shrink the labels past reading, and then fit the width instead and let
+  // the rest be panned to. On a phone, or in a short wide dashboard row,
+  // containing a map this tall renders the node names at two or three
+  // pixels: technically the whole system, legibly nothing.
+  _fitViewBox(natural) {
+    const el = this.querySelector(".smc-graph");
+    const aw = el?.clientWidth || 0;
+    const ah = el?.clientHeight || 0;
+    if (!aw || !ah) return { ...natural };
+    const contained = Math.min(aw / natural.w, ah / natural.h);
+    if (contained * CARD_NAME_PX >= MIN_READABLE_PX) return { ...natural };
+    return { x: natural.x, y: natural.y, w: natural.w, h: natural.w * (ah / aw) };
+  }
+
   _resetView() {
     if (!this._naturalViewBox) return;
-    this._viewBox = { ...this._naturalViewBox };
+    this._viewBox = this._fitViewBox(this._naturalViewBox);
     this._fittedTo = `${this._naturalViewBox.w}x${this._naturalViewBox.h}`;
     // Back under the card's control: fit-to-view again as the map changes.
     this._viewMoved = false;
     this._applyViewBox();
   }
 
+  // Nothing may scroll past the edge of the map. Panning to a finder result
+  // centred the view on the answer with no regard for the map's bounds, so
+  // looking up an entity near the bottom scrolled the top half off-screen and
+  // left a screenful of nothing below it. Applied here rather than at each
+  // call site so the drag, the pinch, the wheel and the finder all obey it.
+  _clampViewBox() {
+    const vb = this._viewBox;
+    const nat = this._naturalViewBox;
+    if (!vb || !nat) return;
+    // A view wider or taller than the map has nothing to scroll on that
+    // axis, so it centres instead of sticking to an edge.
+    vb.x = vb.w >= nat.w ? nat.x + (nat.w - vb.w) / 2 : clamp(vb.x, nat.x, nat.x + nat.w - vb.w);
+    vb.y = vb.h >= nat.h ? nat.y + (nat.h - vb.h) / 2 : clamp(vb.y, nat.y, nat.y + nat.h - vb.h);
+  }
+
   _applyViewBox() {
+    this._clampViewBox();
     const svg = this.querySelector(".smc-graph svg");
     if (svg && this._viewBox) {
       const vb = this._viewBox;
@@ -1718,12 +1811,6 @@ class SystemMapCard extends HTMLElement {
       clearBtn.hidden = true;
       suggestionsEl.hidden = true;
       this._clearHighlight();
-    });
-    // Click-away closes the suggestions dropdown.
-    document.addEventListener("click", (ev) => {
-      if (!this.contains(ev.target)) return;
-      if (ev.target.closest(".smc-entity-search, .smc-entity-suggestions")) return;
-      suggestionsEl.hidden = true;
     });
   }
 
@@ -2058,6 +2145,20 @@ class SystemMapCard extends HTMLElement {
 
   disconnectedCallback() {
     clearTimeout(this._refreshTimer);
+    // Both of these are on objects that outlive the card, so leaving them
+    // attached keeps the whole card - and everything it fetched - alive for
+    // the life of the page.
+    if (this._onKeyDown) window.removeEventListener("keydown", this._onKeyDown);
+    if (this._onDocClick) document.removeEventListener("click", this._onDocClick);
+  }
+
+  connectedCallback() {
+    // Re-attached after being removed: the listeners released on disconnect
+    // have to come back, or the card is inert on a dashboard the user
+    // navigates away from and back to.
+    if (this._onKeyDown) window.addEventListener("keydown", this._onKeyDown);
+    if (this._onDocClick) document.addEventListener("click", this._onDocClick);
+    if (this._built) this._scheduleRefresh();
   }
 
   // Ownership edges are derived by matching a discovered device path against
@@ -2678,8 +2779,10 @@ class SystemMapCard extends HTMLElement {
       hostname: external?.hostname || null,
       badge: external?.hostname || null,
       // Home Assistant is reachable on the LAN like anything else, and was
-      // the one node that only ever showed its public name.
-      lan: `${this._primaryAddress() || ""}:${Number(this._system.core?.port) || 8123}`,
+      // the one node that only ever showed its public name. Without an
+      // address there is no address to show: a bare ":8123" is not one, and
+      // that is what a Core install with no Supervisor was left reading.
+      lan: this._primaryAddress() ? `${this._primaryAddress()}:${Number(this._system.core?.port) || 8123}` : null,
       notes: [
         this._system.core?.version ? `Home Assistant Core ${this._system.core.version}` : null,
         this._system.os?.board ? `on ${this._system.os.board}` : null,
@@ -2898,7 +3001,9 @@ class SystemMapCard extends HTMLElement {
       y += (rows - 1) * LAYOUT_ROW_H + LAYOUT_ROW_H;
     }
 
-    this._layoutBottom = y;
+    // The bottom edge of the last tier box, so anything stacking below it
+    // can use the same gap the tiers use between themselves.
+    this._layoutBottom = y - LAYOUT_ROW_H + CARD_H / 2 + 16;
     return nodes;
   }
 
@@ -3372,7 +3477,18 @@ class SystemMapCard extends HTMLElement {
       })
       .join("");
 
-    const labelsSvg = this._placeEdgeLabels(edgeLabels, visible)
+    // The tier outlines are obstacles too. Labels were avoiding nodes but not
+    // the boxes, so one landing on a box's top edge had that border drawn
+    // straight through it - which reads as struck-through text, not as a
+    // label crossing a line.
+    const boxEdges = TIER_ORDER.filter((t) => boxes[t]).flatMap((t) => {
+      const b = boxes[t];
+      return [
+        { x0: b.minX, x1: b.maxX, y0: b.minY - 2, y1: b.minY + 2 },
+        { x0: b.minX, x1: b.maxX, y0: b.maxY - 2, y1: b.maxY + 2 },
+      ];
+    });
+    const labelsSvg = this._placeEdgeLabels(edgeLabels, visible, boxEdges)
       .map(
         (l) =>
           `<text class="smc-edge-label${l.hot ? " smc-edge-label-hot" : ""}${l.dim ? " smc-dim" : ""}" x="${l.x}" y="${l.y}">${escapeHtml(l.text)}</text>`
@@ -3439,8 +3555,9 @@ class SystemMapCard extends HTMLElement {
           cursor += 22;
         }
 
+        const aria = [n.label, ...subs].join(", ");
         return `
-          <g class="${cls}" data-node="${n.id}"><title>${escapeHtml([n.label, ...subs].join(" · "))}</title>
+          <g class="${cls}" data-node="${n.id}" tabindex="0" role="button" aria-label="${escapeHtml(aria)}"><title>${escapeHtml([n.label, ...subs].join(" · "))}</title>
             <rect class="smc-card" x="${x0}" y="${y0}" width="${w}" height="${h}" rx="12" />
             <path class="smc-card-stripe" d="M${x0 + 12},${y0} H${x0 + w - 12} A12,12 0 0 1 ${x0 + w},${y0 + 12} V${y0 + 5} H${x0} V${y0 + 12} A12,12 0 0 1 ${x0 + 12},${y0} Z" fill="${color}" />
             ${iconSvg}
@@ -3490,12 +3607,19 @@ class SystemMapCard extends HTMLElement {
       color: colorFor(worstStatus(group.entries.map(entryStatus))),
     }));
 
-    const gridTop = (this._layoutBottom || GRID_START_Y) + 40;
+    // Each section is stacked a fixed gap below the previous one's real
+    // bottom edge - the same gap that separates the tiers above - rather
+    // than by summing paddings, which is how a dead band of 150 empty units
+    // opened up between the last tier and the first grid.
+    const gridTop = (this._layoutBottom || GRID_START_Y) + TIER_BOX_GAP;
     const grids = [];
     let cursor = gridTop;
+    let lastBottom = this._layoutBottom || GRID_START_Y;
     const addGrid = (items, geom, color, label, dataAttr) => {
-      const section = this._gridSection({ items, startY: cursor, geom, color, label, dataAttr, dimming, lit });
-      cursor += section.height;
+      const section = this._gridSection({ items, boxTop: cursor, geom, color, label, dataAttr, dimming, lit });
+      if (!section.svg) return;
+      lastBottom = section.bottom;
+      cursor = section.bottom + TIER_BOX_GAP;
       grids.push(section.svg);
     };
 
@@ -3516,7 +3640,7 @@ class SystemMapCard extends HTMLElement {
       }
     }
     const gridsSvg = grids.join("");
-    const totalHeight = cursor > gridTop ? cursor : gridTop - 40;
+    const totalHeight = lastBottom + GRID_PAD;
 
     const natural = { x: 0, y: 0, w: this._geo().width, h: totalHeight };
     this._naturalViewBox = natural;
@@ -3528,10 +3652,10 @@ class SystemMapCard extends HTMLElement {
     // and cut off" was.
     const grew = !this._viewBox || this._fittedTo !== `${natural.w}x${natural.h}`;
     if (grew && !this._viewMoved) {
-      this._viewBox = { ...natural };
+      this._viewBox = this._fitViewBox(natural);
       this._fittedTo = `${natural.w}x${natural.h}`;
     } else if (!this._viewBox) {
-      this._viewBox = { ...natural };
+      this._viewBox = this._fitViewBox(natural);
     }
 
     this.querySelector(".smc-graph").innerHTML = `
@@ -3580,7 +3704,7 @@ class SystemMapCard extends HTMLElement {
   // (SMB loop)" all landed on top of each other and on the host's own name.
   // Greedy and deterministic - good enough for a few dozen labels, and it
   // never reorders them, so the map doesn't reshuffle between renders.
-  _placeEdgeLabels(labels, nodes) {
+  _placeEdgeLabels(labels, nodes, extraObstacles = []) {
     const LINE_H = 13;
     const CHAR_W = 5.2; // 10px font, averaged - only needs to be close
     // Boxes that merely touch look like one long label ("admin access serves
@@ -3589,10 +3713,12 @@ class SystemMapCard extends HTMLElement {
     // Seed with the nodes themselves so a label is never written across a
     // circle or the name underneath it.
     // Cards carry their own text, so their own box is the whole obstacle.
-    const taken = nodes.map((n) => {
-      const { w, h } = cardSize(n);
-      return { x0: n.x - w / 2, x1: n.x + w / 2, y0: n.y - h / 2, y1: n.y + h / 2 };
-    });
+    const taken = nodes
+      .map((n) => {
+        const { w, h } = cardSize(n);
+        return { x0: n.x - w / 2, x1: n.x + w / 2, y0: n.y - h / 2, y1: n.y + h / 2 };
+      })
+      .concat(extraObstacles);
     // How much of `box` is buried under things already placed. Zero means a
     // free slot; otherwise it ranks the candidates so a crowded label can
     // still take the least-bad position rather than staying where it was.
@@ -3626,42 +3752,63 @@ class SystemMapCard extends HTMLElement {
   // per item. Shared by the leftover-add-ons and the integrations grids so
   // both get identical highlight/dim behaviour and neither can drift.
   // Returns its own rendered height so the next section can stack under it.
-  _gridSection({ items, startY, geom, color, label, dataAttr, dimming, lit }) {
-    if (!items.length) return { svg: "", height: 0 };
-    const { spacingX, spacingY, r, marginX, topPad, bottomPad } = geom;
-    const cols = gridCols(geom, this._geo().width);
-    const positions = items.map((item, i) => ({
-      item,
-      x: marginX + (i % cols) * spacingX,
-      y: startY + topPad + Math.floor(i / cols) * spacingY,
-    }));
-    const rows = Math.ceil(items.length / cols);
-    const minX = Math.min(...positions.map((pos) => pos.x)) - r - 16;
-    const maxX = Math.max(...positions.map((pos) => pos.x)) + r + 16;
-    const minY = startY + topPad - r - 16;
-    const maxY = Math.max(...positions.map((pos) => pos.y)) + r + 16;
+  // One labelled box of chips: a rounded pill per item, sized to its own
+  // label. These were fixed-radius circles with the text written inside and
+  // truncated to fit, which meant "systemmonitor" spilled over its own edge
+  // and "utility_meter (3)" was cut to "utility_meter ...". A chip that grows
+  // to its text has neither problem, and the varying widths make the grid
+  // easier to scan than a wall of identical discs.
+  //
+  // Returns the bottom edge of its box so the caller can stack the next one
+  // a fixed gap below, rather than reasoning about padding.
+  _gridSection({ items, boxTop, geom, color, label, dataAttr, dimming, lit }) {
+    if (!items.length) return { svg: "", bottom: boxTop };
+    const { marginX, rowH } = geom;
+    const width = this._geo().width;
+    const right = width - marginX;
+
+    // Flow left to right, wrapping at the canvas edge.
+    const placed = [];
+    let x = marginX;
+    let y = boxTop + GRID_PAD + CHIP_H / 2;
+    for (const item of items) {
+      const w = chipWidth(item.label);
+      if (x > marginX && x + w > right) {
+        x = marginX;
+        y += rowH;
+      }
+      placed.push({ item, x, y, w });
+      x += w + CHIP_GAP;
+    }
+
+    const maxX = Math.min(right, Math.max(...placed.map((c) => c.x + c.w)));
+    const minY = boxTop;
+    const maxY = Math.max(...placed.map((c) => c.y)) + CHIP_H / 2 + GRID_PAD;
 
     const boxSvg =
-      `<rect class="smc-tier-box" x="${minX}" y="${minY}" width="${maxX - minX}" height="${maxY - minY}" rx="14" style="fill:${color};fill-opacity:0.08;stroke:${color};stroke-opacity:0.5;" />` +
-      `<text class="smc-tier-label" x="${minX + 4}" y="${minY - 10}" style="fill:${color}">${escapeHtml(label)}</text>`;
+      `<rect class="smc-tier-box" x="${marginX - GRID_PAD}" y="${minY}" width="${maxX - marginX + 2 * GRID_PAD}" height="${maxY - minY}" rx="14" style="fill:${color};fill-opacity:0.08;stroke:${color};stroke-opacity:0.5;" />` +
+      `<text class="smc-tier-label" x="${marginX - GRID_PAD + 4}" y="${minY - 8}" style="fill:${color}">${escapeHtml(label)}</text>`;
 
-    const nodesSvg = positions
-      .map(({ item, x, y }) => {
+    const nodesSvg = placed
+      .map(({ item, x: cx, y: cy, w }) => {
         const key = `${item.kind}:${item.key}`;
-        this._nodePositions.set(key, { x, y, r });
+        // Recorded by centre, like every other node, so panning to a
+        // highlight and the "is it drawn" check need no special case.
+        this._nodePositions.set(key, { x: cx + w / 2, y: cy, w, h: CHIP_H, r: CHIP_H / 2 });
         const isHi = !!lit?.has(key);
         const problem = this._problemFor(key);
         const cls =
-          "smc-node smc-node-small" + (problem ? " smc-problem" : "") + (dimming ? (isHi ? " smc-hi" : " smc-dim") : "");
+          "smc-node smc-chip-node" + (problem ? " smc-problem" : "") + (dimming ? (isHi ? " smc-hi" : " smc-dim") : "");
         return `
-          <g class="${cls}" ${dataAttr}="${escapeHtml(item.key)}"><title>${escapeHtml(item.label + (problem ? ` - ${problem.reason}` : ""))}</title>
-            <circle cx="${x}" cy="${y}" r="${r}" fill="${item.color}" />
-            <text x="${x}" y="${y + 3}">${escapeHtml(truncate(item.label, 15))}</text>
+          <g class="${cls}" ${dataAttr}="${escapeHtml(item.key)}" tabindex="0" role="button" aria-label="${escapeHtml(item.label + (problem ? `, ${problem.reason}` : ""))}"><title>${escapeHtml(item.label + (problem ? ` - ${problem.reason}` : ""))}</title>
+            <rect class="smc-chip-bg" x="${cx}" y="${cy - CHIP_H / 2}" width="${w}" height="${CHIP_H}" rx="${CHIP_H / 2}" />
+            <circle class="smc-chip-dot" cx="${cx + 13}" cy="${cy}" r="5" fill="${item.color}" />
+            <text class="smc-chip-text" x="${cx + 24}" y="${cy + 4}">${escapeHtml(item.label)}</text>
           </g>`;
       })
       .join("");
 
-    return { svg: boxSvg + nodesSvg, height: topPad + rows * spacingY + bottomPad };
+    return { svg: boxSvg + nodesSvg, bottom: maxY };
   }
 
   _renderChipList(kind) {
@@ -3683,7 +3830,7 @@ class SystemMapCard extends HTMLElement {
         const label = e.title ? `${e.domain}: ${e.title}` : e.domain;
         const isHi = !!lit?.has(`entry:${e.entry_id}`);
         const cls = "smc-chip" + (dimming ? (isHi ? " smc-hi" : " smc-dim") : "");
-        return `<span class="${cls}" data-chip="${escapeHtml(e.entry_id)}" data-chip-kind="entry">
+        return `<span class="${cls}" data-chip="${escapeHtml(e.entry_id)}" data-chip-kind="entry" tabindex="0" role="button">
           <span class="smc-dot" style="background:${colorFor(status)}"></span>${escapeHtml(label)}
         </span>`;
       })
@@ -3781,6 +3928,13 @@ class SystemMapCard extends HTMLElement {
   _focusSet() {
     if (!this._focus) return null;
     const keys = new Set([this._focus]);
+    // A config entry is not drawn on the map any more - its integration is.
+    // Selecting one from the list below would otherwise dim the whole map
+    // and light nothing, since the key it focuses matches no drawn node.
+    if (this._focus.startsWith("entry:")) {
+      const entry = this._entries.find((e) => e.entry_id === this._focus.slice(6));
+      if (entry) keys.add(`domain:${entry.domain}`);
+    }
     const id = this._focus.startsWith("node:") ? this._focus.slice(5) : null;
     if (id) {
       for (const [from, to] of this._edges()) {

@@ -131,6 +131,8 @@ const page = `<!doctype html><html><head><meta charset="utf-8"><style>
   const ADDONS = ${JSON.stringify(ADDONS)};
   const CONFIG = ${JSON.stringify(CONFIG)};
   const SELECT = ${JSON.stringify(process.env.SMC_SELECT || "")};
+  const DEGRADE = ${JSON.stringify(!!process.env.SMC_DEGRADE)};
+  const FIND = ${JSON.stringify(process.env.SMC_FIND || "")};
   const CLOUDFLARED_LOG = ${JSON.stringify(CLOUDFLARED_LOG)};
   const RESPONSES = ${JSON.stringify(RESPONSES)};
   const ENTRIES = ${JSON.stringify(ENTRIES)};
@@ -141,6 +143,9 @@ const page = `<!doctype html><html><head><meta charset="utf-8"><style>
     connection: {
       async sendMessagePromise(msg) {
         if (msg.type === "supervisor/api") {
+          // SMC_DEGRADE stands in for a Core or Container install, which has
+          // no Supervisor at all - roughly half of what this card reads.
+          if (DEGRADE) throw new Error("Not found");
           const key = msg.endpoint.replace(/\\/addons\\/[^/]+\\/(info|stats|logs)$/, "");
           if (msg.endpoint in RESPONSES) return { data: RESPONSES[msg.endpoint] };
           if (msg.endpoint.endsWith("/logs")) {
@@ -223,6 +228,7 @@ const page = `<!doctype html><html><head><meta charset="utf-8"><style>
         await card._openDetail("node", SELECT);
         card._panToHighlight?.();
       }
+      if (FIND) await card._highlightEntity(FIND);
       setTimeout(r, 300);
     }, 3500)
   );
