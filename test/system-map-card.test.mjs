@@ -15,7 +15,7 @@ import vm from "node:vm";
 
 const src = fs.readFileSync("system-map-card.js", "utf8") +
   "\nglobalThis.__SMC = SystemMapCard;\nglobalThis.__EDITOR = SystemMapCardEditor;\n" +
-  "globalThis.__EXPORT = { resolveCssVars, svgOnlyCss, gridCols, layoutGeometry };\n";
+  "globalThis.__EXPORT = { resolveCssVars, svgOnlyCss, gridCols, layoutGeometry, worstStatus };\n";
 
 const makeEl = () => ({
   innerHTML: "", textContent: "", hidden: false, scrollTop: 0,
@@ -905,7 +905,10 @@ c._renderGraph();
 const svg = c._els.get(".smc-graph").innerHTML;
 T("discovered hardware is drawn", svg.includes('data-node="hw_drive_drive_liteon"'), true);
 T("a flagged node gets the problem class", svg.includes("smc-problem"), true);
-T("every config entry still gets a node", c._entries.every((e) => c._nodePositions.has(`entry:${e.entry_id}`)), true);
+// The invariant is "nothing on this instance is missing from the map", not
+// "one circle per config entry" - the map draws one node per integration now.
+T("every config entry is still represented on the map",
+  c._entries.every((e) => c._nodePositions.has(`domain:${e.domain}`)), true);
 c._renderStatusBar();
 T("the status bar renders one pill per status item",
   (c._els.get(".smc-status").innerHTML.match(/data-status=/g) || []).length, c._statusItems().length);
@@ -1496,5 +1499,138 @@ T("column spacing does not change with how many are in the row",
       .flatMap((xs) => xs.slice(1).map((x, i) => x - xs[i]));
     return new Set(gaps).size;
   })(), 1);
+
+// --- merged integration nodes ----------------------------------------------
+// An integration that makes a config entry per device or per helper - a local
+// Tuya bridge with three plugs, a dozen utility meters, switch-as-x - drew a
+// row of identical circles saying nothing the one node doesn't. Merging them
+// is only defensible while every entry stays reachable and no state is lost.
+function mergeCard(extra = {}) {
+  const card = newCard(extra);
+  card._entries = [
+    { entry_id: "t1", domain: "localtuya", title: "Desk plug", state: "loaded", source: "user" },
+    { entry_id: "t2", domain: "localtuya", title: "Lamp", state: "loaded", source: "user" },
+    { entry_id: "t3", domain: "localtuya", title: "Fan", state: "setup_error", source: "user" },
+    { entry_id: "u1", domain: "utility_meter", title: "Daily", state: "loaded", source: "user" },
+    { entry_id: "u2", domain: "utility_meter", title: "Monthly", state: "loaded", source: "user" },
+    { entry_id: "h1", domain: "hue", title: "Hue Bridge", state: "loaded", source: "user" },
+  ];
+  card._entityRegistry = [
+    { entity_id: "switch.desk", platform: "localtuya", config_entry_id: "t1", unique_id: "d1" },
+  ];
+  card._derive();
+  card._renderGraph();
+  return card;
+}
+const merged = mergeCard();
+const mergedSvg = merged._els.get(".smc-graph").innerHTML;
+
+T("three entries of one integration draw as one node",
+  (mergedSvg.match(/data-node-domain="localtuya"/g) || []).length, 1);
+T("the merged node says how many it stands for", mergedSvg.includes("localtuya (3)"), true);
+T("an integration with a single entry is not labelled with a count",
+  [mergedSvg.includes("hue (1)"), /data-node-domain="hue"/.test(mergedSvg)], [false, true]);
+T("every integration is drawn exactly once",
+  (mergedSvg.match(/data-node-domain=/g) || []).length,
+  new Set(merged._entries.map((e) => e.domain)).size);
+
+// A merged node covering a broken entry must not read as healthy.
+T("the merged node wears the worst state among its entries",
+  __EXPORT.worstStatus(["loaded", "loaded", "error"]), "error");
+T("all-healthy entries still read as healthy", __EXPORT.worstStatus(["loaded", "loaded"]), "loaded");
+T("a disabled entry outranks a loaded one but not an error",
+  [__EXPORT.worstStatus(["loaded", "disabled"]), __EXPORT.worstStatus(["disabled", "error"])],
+  ["disabled", "error"]);
+
+T("every config entry is still listed individually below the map",
+  (() => {
+    const card = mergeCard();
+    card._renderChipList("integrations");
+    const html = card._els.get('[data-list="integrations"]').innerHTML;
+    return card._entries.every((e) => html.includes(`data-chip="${e.entry_id}"`));
+  })(), true);
+
+// The finder has to answer in both currencies at once: the map knows only
+// the integration, the list below knows only the entry.
+const found = merged._mapTargetForRegistryEntry({ platform: "localtuya", config_entry_id: "t1" });
+T("an entity resolves to both the drawn node and its own entry",
+  [found.keys.includes("domain:localtuya"), found.keys.includes("entry:t1")], [true, true]);
+T("the finder still names the specific entry, not just the integration",
+  found.names[0].includes("Desk plug"), true);
+T("the merged node is where a highlight actually lands",
+  merged._nodePositions.has("domain:localtuya"), true);
+
+// Selecting the merged node has to reach the entries behind it, or merging
+// has thrown information away rather than folded it up.
+T("the merged node's panel lists the entries behind it",
+  (() => {
+    const card = mergeCard();
+    card._detailKey = "domain:localtuya";
+    card._renderDetail();
+    const html = card._els.get(".smc-detail").innerHTML;
+    return ["Desk plug", "Lamp", "Fan"].every((name) => html.includes(name));
+  })(), true);
+
+// Counts and problems are keyed off the same resolution, so they land on the
+// merged node rather than vanishing with the per-entry keys.
+T("entity counts land on the merged node",
+  (() => {
+    const card = mergeCard({ show_counts: true });
+    card._buildCounts();
+    return card._counts.get("domain:localtuya")?.entities;
+  })(), 1);
+
+// --- fitting the view ------------------------------------------------------
+// The first render happens before any data has arrived, so the map it fits is
+// a fraction of the final one. The view was set once and never again, which
+// left everything that loaded afterwards below the bottom edge - the "map is
+// tiny and cut off, with empty margins either side" report.
+T("the view re-fits when the map grows under it",
+  (() => {
+    const card = newCard();
+    card._renderGraph();
+    const first = card._naturalViewBox.h;
+    card._addons = [...card._addons, ...Array.from({ length: 20 }, (_, i) => ({ slug: `x${i}`, name: `Extra ${i}`, state: "started" }))];
+    card._derive();
+    card._renderGraph();
+    return [card._naturalViewBox.h > first, card._viewBox.h === card._naturalViewBox.h];
+  })(), [true, true]);
+
+// ...but a view the user has moved is theirs. Snapping it back on every
+// 60-second refresh would make the card unusable.
+T("a view the user has zoomed is left alone when the map grows",
+  (() => {
+    const card = newCard();
+    card._renderGraph();
+    card._zoomBy(0.5);
+    const held = { ...card._viewBox };
+    card._addons = [...card._addons, { slug: "x", name: "Extra", state: "started" }];
+    card._derive();
+    card._renderGraph();
+    return [card._viewBox.w, card._viewBox.h];
+  })(), (() => {
+    const card = newCard();
+    card._renderGraph();
+    card._zoomBy(0.5);
+    return [card._viewBox.w, card._viewBox.h];
+  })());
+
+T("panning marks the view as the user's, but the finder panning to a result does not",
+  (() => {
+    const card = newCard();
+    card._renderGraph();
+    card._highlight = new Set(["node:host"]);
+    card._panToHighlight();
+    return card._viewMoved;
+  })(), false);
+
+T("reset hands the view back to the card",
+  (() => {
+    const card = newCard();
+    card._renderGraph();
+    card._zoomBy(0.5);
+    card._resetView();
+    return [card._viewMoved, card._viewBox.h === card._naturalViewBox.h];
+  })(), [false, true]);
 
 process.exit(all ? 0 : 1);

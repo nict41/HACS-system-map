@@ -8,6 +8,63 @@ was already there in a way an existing dashboard would notice.
 `VERSION` in `system-map-card.js` is the source of truth and CI refuses to
 publish a release whose tag doesn't match it.
 
+## [1.12.0] - 2026-09-03
+
+### Changed
+
+- **One node per integration, not per config entry.** An integration that
+  makes an entry per device or per helper - a local Tuya bridge with three
+  plugs, a dozen utility meters, switch-as-x - drew a row of identical
+  circles that said nothing the single node doesn't. They are merged, with
+  the count in the label (`localtuya (3)`), and the merged node wears the
+  worst state among its entries so one broken entry out of five can't be
+  swallowed by a green circle. Nothing becomes unreachable: the entries are
+  still listed individually below the map and in the merged node's own
+  detail panel, and the entity finder answers in both currencies at once -
+  the integration for the map, the specific entry for the list.
+
+### Fixed
+
+- **The map didn't fit its own view.** The view was fitted on the first
+  render and never again, and the first render happens before any data has
+  arrived - so the map it fitted was a fraction of the final one. Everything
+  that loaded afterwards sat below the bottom edge, which is why the map
+  read as tiny and cut off with empty margins either side. It now re-fits
+  whenever its own size changes, and stops doing so the moment the user
+  zooms or pans, since a view that snapped back on every refresh would be
+  worse than one that never moved. The reset button hands control back.
+
+## [1.11.0] - 2026-09-03
+
+### Added
+
+- **Selecting a node lights its own connections.** "What is this joined to"
+  is the question a diagram exists to answer, and it was unanswerable: a
+  click opened a panel and left two dozen identical grey lines on screen.
+  The selected node's edges are drawn in amber with their labels picked out,
+  its neighbours stay lit, and everything else dims. The entity finder's
+  highlight still outranks a selection when both are live - they are
+  different claims.
+- **Cards per row is configurable**, and the canvas widens to suit, so a
+  landscape dashboard can use its width instead of drawing a tall column of
+  cards with empty margins either side. The auto-grids below take their own
+  column count from that same width rather than adding a second knob.
+
+### Fixed
+
+- **The PNG export rendered in a serif, with grey pills and no dashed
+  boundary.** Two faults. A standalone SVG inherits nothing and SVG's
+  default font is a serif, so every label came out in Times while the card
+  on screen used the dashboard's font - which it gets by inheritance and
+  never declares. And the filter deciding which CSS can apply inside the SVG
+  treated anything outside braces as a selector, so a comment above a rule
+  was swallowed into that rule's selector; since most rules here are written
+  under a comment, what got dropped was the amber hostname pill, the
+  edge-label halos, the dashed Internet boundary and the highlight ring.
+- **Rows stretched to the full width whatever their length**, so a last row
+  of three was spaced like a row of ten and no two rows lined up. Rows now
+  keep a fixed column step and centre as a block.
+
 ## [1.10.0] - 2026-09-02
 
 ### Added

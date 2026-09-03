@@ -112,7 +112,7 @@
 // version in the console is always the version of the file that's running -
 // which is the first thing worth knowing when a dashboard misbehaves after
 // an update, and the quickest way to catch a stale browser cache.
-const VERSION = "1.11.0";
+const VERSION = "1.12.0";
 
 console.info(
   `%c SYSTEM-MAP-CARD %c v${VERSION} `,
@@ -511,6 +511,17 @@ function entryStatus(entry) {
   if (entry.source === "ignore") return "ignored";
   if (entry.state && entry.state !== "loaded") return "error";
   return "loaded";
+}
+
+// The state a merged node should wear. Worst wins, because one dead entry
+// out of five is exactly the fact merging must not swallow - "loaded" on a
+// node covering a broken integration would be a lie the map tells.
+const STATUS_SEVERITY = { error: 4, unknown: 3, disabled: 2, ignored: 2, stopped: 2, loaded: 1, started: 1 };
+function worstStatus(statuses) {
+  return statuses.reduce(
+    (worst, s) => ((STATUS_SEVERITY[s] || 3) > (STATUS_SEVERITY[worst] || 3) ? s : worst),
+    statuses[0] || "unknown"
+  );
 }
 
 // "Inactive" for the purposes of the hide-inactive filter - deliberately
@@ -983,6 +994,11 @@ class SystemMapCard extends HTMLElement {
     // map's extent, so both always need redoing; the fetched data does not.
     this._built = false;
     this._viewBox = null;
+    // Set once the user zooms or pans, after which the card stops re-fitting
+    // the view for them - a map that snapped back on every refresh would be
+    // unusable.
+    this._viewMoved = false;
+    this._fittedTo = null;
     if (!first) return this._applyConfig();
 
     this._loaded = false;
@@ -1308,6 +1324,8 @@ class SystemMapCard extends HTMLElement {
     if (addonNode) return this._openDetail("addon", addonNode.getAttribute("data-node-addon"));
     const entryNode = ev.target.closest("[data-node-entry]");
     if (entryNode) return this._openDetail("entry", entryNode.getAttribute("data-node-entry"));
+    const domainNode = ev.target.closest("[data-node-domain]");
+    if (domainNode) return this._openDetail("domain", domainNode.getAttribute("data-node-domain"));
     const pill = ev.target.closest("[data-status]");
     if (pill) return this._openDetail("status", pill.getAttribute("data-status"));
     const chip = ev.target.closest("[data-chip]");
@@ -1432,6 +1450,7 @@ class SystemMapCard extends HTMLElement {
       const vb = this._viewBox;
       vb.x = pointerState.vbX - dx * (vb.w / pointerState.rectW);
       vb.y = pointerState.vbY - dy * (vb.h / pointerState.rectH);
+      this._viewMoved = true;
       this._applyViewBox();
     });
 
@@ -1589,6 +1608,7 @@ class SystemMapCard extends HTMLElement {
 
   _zoomBy(factor, cx, cy) {
     if (!this._viewBox || !this._naturalViewBox) return;
+    this._viewMoved = true;
     const vb = this._viewBox;
     const nat = this._naturalViewBox;
     const aspect = nat.w / nat.h;
@@ -1623,12 +1643,16 @@ class SystemMapCard extends HTMLElement {
     const tx = (mid.x - vb.x) / vb.w;
     const ty = (mid.y - vb.y) / vb.h;
     this._viewBox = { x: pinch.mid.x - tx * newW, y: pinch.mid.y - ty * newH, w: newW, h: newH };
+    this._viewMoved = true;
     this._applyViewBox();
   }
 
   _resetView() {
     if (!this._naturalViewBox) return;
     this._viewBox = { ...this._naturalViewBox };
+    this._fittedTo = `${this._naturalViewBox.w}x${this._naturalViewBox.h}`;
+    // Back under the card's control: fit-to-view again as the map changes.
+    this._viewMoved = false;
     this._applyViewBox();
   }
 
@@ -1791,8 +1815,8 @@ class SystemMapCard extends HTMLElement {
     // hide-inactive filter removes stopped add-ons and disabled/ignored
     // integrations from the map. Saying so beats a highlight that silently
     // lands on nothing.
-    const undrawn = [...this._highlight].filter((k) => !this._nodePositions.has(k));
-    if (undrawn.length) resultEl.textContent += ` - not currently drawn (hidden by the "Hide inactive" filter).`;
+    const drawn = [...this._highlight].some((k) => this._nodePositions.has(k));
+    if (!drawn) resultEl.textContent += ` - not currently drawn (hidden by the "Hide inactive" filter).`;
     else this._panToHighlight();
   }
 
@@ -1836,7 +1860,15 @@ class SystemMapCard extends HTMLElement {
 
     if (entry) {
       const name = entry.title ? `${entry.domain}: ${entry.title}` : entry.domain;
-      return { keys: [`entry:${entry.entry_id}`], names: [`${name} (in the Integrations grid)`] };
+      // Two keys on purpose. The map draws one node per integration, so the
+      // graph highlight has to be the domain's; the list below it is still
+      // per-entry, and highlighting the exact entry there is the more useful
+      // half of the answer. Both live in one set, and each view takes the
+      // key it knows about.
+      return {
+        keys: [`domain:${entry.domain}`, `entry:${entry.entry_id}`],
+        names: [`${name} (in the Integrations grid)`],
+      };
     }
     return null;
   }
@@ -3438,12 +3470,24 @@ class SystemMapCard extends HTMLElement {
     // that's the default; two entries of the same domain (two MQTT brokers,
     // two cameras) would draw as identical circles though, so those - and
     // only those - get their title appended to tell them apart.
-    const domainCounts = otherEntries.reduce((m, e) => m.set(e.domain, (m.get(e.domain) || 0) + 1), new Map());
-    const entryItems = otherEntries.map((e) => ({
-      kind: "entry",
-      key: e.entry_id,
-      label: domainCounts.get(e.domain) > 1 && e.title ? `${e.domain}: ${e.title}` : e.domain,
-      color: colorFor(entryStatus(e)),
+    // One circle per integration, not per config entry. An integration that
+    // makes an entry per device or per helper - a local Tuya bridge, utility
+    // meters, switch-as-x - drew a row of identical circles that said nothing
+    // the single node doesn't. The entries themselves stay in the list below
+    // and in this node's detail panel, so nothing becomes unreachable.
+    const byDomain = new Map();
+    for (const e of otherEntries) {
+      const group = byDomain.get(e.domain) || { entries: [], domain: e.domain };
+      group.entries.push(e);
+      byDomain.set(e.domain, group);
+    }
+    const entryItems = [...byDomain.values()].map((group) => ({
+      kind: "domain",
+      key: group.domain,
+      label: group.entries.length > 1 ? `${group.domain} (${group.entries.length})` : group.domain,
+      // The worst state among them: one dead entry out of five is a fact the
+      // merged node must not swallow.
+      color: colorFor(worstStatus(group.entries.map(entryStatus))),
     }));
 
     const gridTop = (this._layoutBottom || GRID_START_Y) + 40;
@@ -3465,10 +3509,10 @@ class SystemMapCard extends HTMLElement {
         // integration is filed under the area holding most of its devices,
         // never in two places at once.
         for (const [areaName, items] of this._groupByArea(entryItems)) {
-          addGrid(items, ENTRY_GRID, ENTRY_GRID_COLOR, `Integrations - ${areaName}`, "data-node-entry");
+          addGrid(items, ENTRY_GRID, ENTRY_GRID_COLOR, `Integrations - ${areaName}`, "data-node-domain");
         }
       } else {
-        addGrid(entryItems, ENTRY_GRID, ENTRY_GRID_COLOR, "Integrations (every config entry)", "data-node-entry");
+        addGrid(entryItems, ENTRY_GRID, ENTRY_GRID_COLOR, "Integrations", "data-node-domain");
       }
     }
     const gridsSvg = grids.join("");
@@ -3476,7 +3520,19 @@ class SystemMapCard extends HTMLElement {
 
     const natural = { x: 0, y: 0, w: this._geo().width, h: totalHeight };
     this._naturalViewBox = natural;
-    if (!this._viewBox) this._viewBox = { ...natural };
+    // Re-fit whenever the map's own size changes, unless the user has moved
+    // the view themselves. The first render happens before any data arrives,
+    // so the map it fits is a fraction of the final one - and the view was
+    // only ever set once, leaving everything that loaded afterwards below
+    // the bottom edge with the sides empty. That is what "the map is tiny
+    // and cut off" was.
+    const grew = !this._viewBox || this._fittedTo !== `${natural.w}x${natural.h}`;
+    if (grew && !this._viewMoved) {
+      this._viewBox = { ...natural };
+      this._fittedTo = `${natural.w}x${natural.h}`;
+    } else if (!this._viewBox) {
+      this._viewBox = { ...natural };
+    }
 
     this.querySelector(".smc-graph").innerHTML = `
       <svg viewBox="${this._viewBox.x} ${this._viewBox.y} ${this._viewBox.w} ${this._viewBox.h}" xmlns="http://www.w3.org/2000/svg">
@@ -3504,7 +3560,7 @@ class SystemMapCard extends HTMLElement {
     const areaName = new Map(this._areas.map((a) => [a.area_id, a.name || a.area_id]));
     const groups = new Map();
     for (const item of items) {
-      const counts = this._counts.get(`entry:${item.key}`);
+      const counts = this._counts.get(`${item.kind}:${item.key}`);
       const best = counts?.areas?.size
         ? [...counts.areas.entries()].sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])))[0][0]
         : null;
@@ -3974,6 +4030,28 @@ class SystemMapCard extends HTMLElement {
         ["Source", entry.source],
         ["Disabled by", entry.disabled_by || "-"],
       ];
+    } else if (kind === "domain") {
+      // One integration, however many config entries it made. This panel is
+      // where those entries stay visible - merging them on the map is only
+      // defensible if the individual ones are still one click away.
+      const entries = this._entries.filter((e) => e.domain === key);
+      if (!entries.length) return this._closeDetail();
+      const hub = this._derived.nodes.find((n) => n.kind === "integration" && n.domain === key);
+      title = entries.length > 1 ? `${key} (${entries.length} entries)` : entries[0].title || key;
+      if (hub) role = (hub.notes || []).join(". ");
+      rows = [["Domain", key], ["Entries", String(entries.length)]];
+      if (entries.length > 1) {
+        sections += `<div class="smc-detail-section"><h4>Config entries</h4><dl>${entries
+          .map(
+            (e) =>
+              `<dt>${escapeHtml(e.title || e.entry_id)}</dt><dd>${escapeHtml(
+                [entryStatus(e), e.source, e.disabled_by ? `disabled by ${e.disabled_by}` : ""].filter(Boolean).join(" - ")
+              )}</dd>`
+          )
+          .join("")}</dl></div>`;
+      } else {
+        rows.push(["State", entries[0].state], ["Source", entries[0].source]);
+      }
     }
 
     // Problem / health / area detail applies to whichever node this is, so

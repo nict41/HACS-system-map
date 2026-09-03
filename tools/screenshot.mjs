@@ -51,18 +51,24 @@ const ENTRIES = [
   ["cast", "Google Cast"], ["hacs", "HACS"], ["mobile_app", "Phone"], ["tado", "Tado"],
   ["octoprint", "OctoPrint"], ["systemmonitor", "System Monitor"], ["backup", "Backup"],
   ["zeroconf", "Zeroconf"], ["ipp", "Printer"], ["upnp", "UPnP"],
+  // Two integrations that make an entry per device and per helper. Both are
+  // the case the map merges, so the shot shows the merged nodes rather than
+  // a row of identical circles.
+  ["localtuya", "Desk plug"], ["localtuya", "Bedroom lamp"], ["localtuya", "Fan"],
+  ["utility_meter", "Energy daily"], ["utility_meter", "Energy monthly"],
+  ["utility_meter", "Water daily"], ["switch_as_x", "Kettle as switch"],
 ].map(([domain, title], i) => ({
-  entry_id: `e_${domain}`, domain, title, source: "user",
+  entry_id: `e_${domain}_${i}`, domain, title, source: "user",
   state: "loaded", disabled_by: domain === "spotify" ? "user" : null,
 }));
 
 // One integration with a dead entity, so the problem ring is in the shot.
 const ENTITIES = [
   ...ENTRIES.flatMap((e, i) => [
-    { entity_id: `sensor.${e.domain}_a`, platform: e.domain, config_entry_id: e.entry_id, device_id: `d_${e.domain}`, area_id: null },
-    { entity_id: `sensor.${e.domain}_b`, platform: e.domain, config_entry_id: e.entry_id, device_id: `d_${e.domain}`, area_id: null },
+    { entity_id: `sensor.${e.entry_id}_a`, platform: e.domain, config_entry_id: e.entry_id, device_id: `d_${e.entry_id}`, area_id: null },
+    { entity_id: `sensor.${e.entry_id}_b`, platform: e.domain, config_entry_id: e.entry_id, device_id: `d_${e.entry_id}`, area_id: null },
   ]),
-  { entity_id: "sensor.zigbee_dead", platform: "mqtt", config_entry_id: "e_mqtt", device_id: "d_mqtt" },
+  { entity_id: "sensor.zigbee_dead", platform: "mqtt", config_entry_id: "e_mqtt_0", device_id: "d_mqtt" },
 ];
 
 const STATES = Object.fromEntries([

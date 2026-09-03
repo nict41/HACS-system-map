@@ -27,7 +27,10 @@ outline and a count.
   and *every* config entry is auto-laid-out into its own labelled grid, so
   each installed integration has a real node on the map
 - Zoom (mouse wheel, pinch, or on-screen buttons) and pan (drag with one
-  finger, the mouse, or two fingers during a pinch)
+  finger, the mouse, or two fingers during a pinch); the map fits itself to
+  the view until you move it yourself
+- **Selecting a node lights its own connections** - its edges in amber with
+  their labels picked out, its neighbours lit, everything else dimmed
 - Click any node for live detail: state, version, internal port, and (where
   applicable) its public URL
 - "Hide inactive" filter for stopped add-ons and disabled/ignored
@@ -75,6 +78,10 @@ outline and a count.
     spotting without reading the card
   - **Each add-on's own icon**, served by Supervisor through a signed URL,
     with the status colour on the card's top stripe
+  - **One node per integration**, not per config entry: an integration that
+    makes an entry per device or per helper is merged, with the count in the
+    label and the worst of its states as its colour; the entries themselves
+    stay in the list below the map and in the node's detail panel
   - **Routers** from integrations reporting `device_tracker` entities with
     `source_type: router`
   - **Positions** by a barycentre pass that keeps connected nodes near each
@@ -97,6 +104,7 @@ editor (three-dot menu on the card -> Edit).
 | --- | --- | --- |
 | `title` | `System Map` | Card heading |
 | `graph_height` | `480` | Height of the map area, in pixels |
+| `columns` | `6` | Service cards per row (3-12). The canvas widens to suit, so a wide dashboard can use its width |
 | `refresh_interval` | `60` | Seconds between background refreshes; `0` disables |
 | `hide_inactive` | `false` | Start with stopped/disabled things hidden |
 | `tiers` | all four | Which tiers to draw |
@@ -179,7 +187,7 @@ checked against `VERSION` and refused if the two disagree.
 ## Development
 
 ```
-node test/system-map-card.test.mjs      # 188 assertions, no dependencies
+node test/system-map-card.test.mjs      # 236 assertions, no dependencies
 ```
 
 No build step: the card is evaluated against a stubbed DOM, covering config
