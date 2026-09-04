@@ -423,7 +423,7 @@ const DOMAIN_SERVICE_PORTS = {
 // A tunnel's ingress rules point at addresses on this network. Recognising
 // them must not depend on /network/info having answered, or on the rule
 // naming the same interface the Supervisor reports - so any private address
-// counts. This is what makes "http://192.168.8.25:8080" resolvable on an
+// counts. This is what makes "http://192.168.1.50:8080" resolvable on an
 // instance where the network endpoint returned nothing useful.
 function isPrivateAddress(host) {
   return (
@@ -706,7 +706,7 @@ const GRID_START_Y = 1180; // first auto-grid sits below the curated layout
 const SUPERVISOR_KEYS = new Set(["addons", "host", "core", "os", "supervisor", "network", "backups", "hardware"]);
 
 // A node is a card, not a circle. 148 wide is set by the longest thing it
-// has to hold legibly - a hostname like "share.nicholastoo.com" at 9.5px -
+// has to hold legibly - a hostname like "share.example.com" at 9.5px -
 // since a truncated hostname defeats the point of showing one at all.
 const CARD_W = 148;
 const CARD_H = 144;
@@ -2511,7 +2511,7 @@ class SystemMapCard extends HTMLElement {
     // Optional, and off by default because it means reading every running
     // add-on's whole log. An add-on logs the services it dials at startup -
     // Immich announces its machine-learning sidecar as
-    // "became healthy (http://192.168.8.25:3004)" - and that host:port
+    // "became healthy (http://192.168.1.50:3004)" - and that host:port
     // resolves to another add-on exactly as a tunnel's ingress rule does.
     if (!this._config.scan_service_logs) return;
     const dialled = [];

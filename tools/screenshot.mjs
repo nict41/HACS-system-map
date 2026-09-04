@@ -25,19 +25,19 @@ const out = process.env.SMC_OUT || path.join(root, "docs", "screenshot.png");
 const cardSource = fs.readFileSync(path.join(root, "system-map-card.js"), "utf8");
 
 const ADDONS = [
-  ["45df7312_zigbee2mqtt", "Zigbee2MQTT", "started"],
+  ["a0d7b954_zigbee2mqtt", "Zigbee2MQTT", "started"],
   ["core_mosquitto", "Mosquitto broker", "started"],
-  ["c9a35110_sambanas", "Samba NAS", "started"],
-  ["3b88f413_immich", "Immich", "started"],
-  ["beb500c8_immich_ml", "Immich ML", "started"],
-  ["beb500c8_kiwix", "Kiwix", "started"],
+  ["d1c2b3a4_samba_nas", "Samba NAS", "started"],
+  ["d1c2b3a4_photoprism", "PhotoPrism", "started"],
+  ["d1c2b3a4_thumbnailer", "Thumbnail worker", "started"],
+  ["d1c2b3a4_jellyfin", "Jellyfin", "started"],
   ["a0d7b954_adguard", "AdGuard Home", "started"],
-  ["a0d7b954_tailscale", "Tailscale", "started"],
-  ["9074a9fa_cloudflared", "Cloudflared", "started"],
-  ["beb500c8_wordpress", "WordPress", "started"],
-  ["beb500c8_pingvin_share", "Pingvin Share", "started"],
-  ["beb500c8_nas1_usb_watcher", "NAS1 USB Watcher", "started"],
-  ["7b7df7b9_claudecode", "Claude Code", "started"],
+  ["d1c2b3a4_tailscale", "Tailscale", "started"],
+  ["d1c2b3a4_cloudflared", "Cloudflared", "started"],
+  ["d1c2b3a4_paperless", "Paperless-ngx", "started"],
+  ["d1c2b3a4_uptime_kuma", "Uptime Kuma", "started"],
+  ["d1c2b3a4_backup_watcher", "Backup watcher", "started"],
+  ["d1c2b3a4_portainer", "Portainer", "started"],
   ["core_ssh", "Advanced SSH & Web Terminal", "started"],
   ["core_configurator", "File editor", "started"],
   ["a0d7b954_nodered", "Node-RED", "started"],
@@ -45,12 +45,11 @@ const ADDONS = [
 ].map(([slug, name, state]) => ({ slug, name, state, version: "1.4.2", icon: true, update_available: slug.includes("zigbee") }));
 
 const ENTRIES = [
-  ["mqtt", "Mosquitto"], ["zha", "ZHA"], ["asusrouter", "ASUS Router"], ["huawei_lte", "Huawei LTE"],
-  ["hue", "Hue Bridge"], ["mjpeg", "3D Print Cam"], ["spotify", "Spotify"], ["sonos", "Sonos"],
-  ["met", "Met.no"], ["sun", "Sun"], ["shelly", "Shelly Plug"], ["esphome", "Desk Sensor"],
-  ["cast", "Google Cast"], ["hacs", "HACS"], ["mobile_app", "Phone"], ["tado", "Tado"],
-  ["octoprint", "OctoPrint"], ["systemmonitor", "System Monitor"], ["backup", "Backup"],
-  ["zeroconf", "Zeroconf"], ["ipp", "Printer"], ["upnp", "UPnP"],
+  ["mqtt", "Mosquitto"], ["zha", "ZHA"], ["unifi", "Router"], ["hue", "Hue Bridge"],
+  ["mjpeg", "Garage Cam"], ["media_player", "Living room speaker"], ["met", "Met.no"], ["sun", "Sun"],
+  ["shelly", "Shelly Plug"], ["esphome", "Greenhouse sensor"], ["cast", "Google Cast"], ["hacs", "HACS"],
+  ["mobile_app", "Phone"], ["climate", "Thermostat"], ["systemmonitor", "System Monitor"],
+  ["backup", "Backup"], ["zeroconf", "Zeroconf"], ["ipp", "Printer"], ["upnp", "UPnP"],
   // Two integrations that make an entry per device and per helper. Both are
   // the case the map merges, so the shot shows the merged nodes rather than
   // a row of identical circles.
@@ -59,7 +58,7 @@ const ENTRIES = [
   ["utility_meter", "Water daily"], ["switch_as_x", "Kettle as switch"],
 ].map(([domain, title], i) => ({
   entry_id: `e_${domain}_${i}`, domain, title, source: "user",
-  state: "loaded", disabled_by: domain === "spotify" ? "user" : null,
+  state: "loaded", disabled_by: domain === "upnp" ? "user" : null,
 }));
 
 // One integration with a dead entity, so the problem ring is in the shot.
@@ -86,10 +85,10 @@ const CLOUDFLARED_LOG = [
   "[13:58:22] INFO: Using Cloudflare Remote Management Tunnel",
   "[13:58:22] INFO: All app (add-on) configuration options except tunnel_token will be ignored.",
   '2026-09-02T12:58:22Z INF Updated to new configuration config="{\\"ingress\\":[' +
-    '{\\"hostname\\":\\"ha.example.com\\", \\"service\\":\\"http://192.168.8.25:8123\\"}, ' +
-    '{\\"hostname\\":\\"nas.example.com\\", \\"service\\":\\"http://192.168.8.25:8080\\"}, ' +
-    '{\\"hostname\\":\\"example.com\\", \\"service\\":\\"http://192.168.8.25:5051\\"}, ' +
-    '{\\"hostname\\":\\"share.example.com\\", \\"service\\":\\"http://192.168.8.25:8095\\"}, ' +
+    '{\\"hostname\\":\\"home.example.com\\", \\"service\\":\\"http://192.168.1.50:8123\\"}, ' +
+    '{\\"hostname\\":\\"photos.example.com\\", \\"service\\":\\"http://192.168.1.50:2342\\"}, ' +
+    '{\\"hostname\\":\\"example.com\\", \\"service\\":\\"http://192.168.1.50:8096\\"}, ' +
+    '{\\"hostname\\":\\"docs.example.com\\", \\"service\\":\\"http://192.168.1.50:8000\\"}, ' +
     '{\\"service\\":\\"http_status:404\\"}]}" version=15',
 ].join("\n");
 
@@ -100,15 +99,15 @@ const RESPONSES = {
   "/core/info": { version: "2026.8.3", version_latest: "2026.9.0", update_available: true, arch: "amd64", machine: "generic-x86-64" },
   "/os/info": { version: "18.2", version_latest: "18.2", update_available: false, board: "generic-x86-64" },
   "/supervisor/info": { version: "2026.08.0", channel: "stable", update_available: false },
-  "/network/info": { host_internet: true, supervisor_internet: true, interfaces: [{ interface: "enp1s0", type: "ethernet", primary: true, connected: true, ipv4: { address: ["192.168.8.25/24"] } }] },
+  "/network/info": { host_internet: true, supervisor_internet: true, interfaces: [{ interface: "eth0", type: "ethernet", primary: true, connected: true, ipv4: { address: ["192.168.1.50/24"] } }] },
   "/backups": { backups: [{ slug: "b1", name: "Automatic backup", date: new Date(now - 41 * 60000).toISOString(), size: 512 }] },
   "/hardware/info": {
-    devices: [{ name: "ttyUSB0", subsystem: "tty", dev_path: "/dev/ttyUSB0", by_id: "/dev/serial/by-id/usb-ITEAD_SONOFF_Zigbee_3.0_USB_Dongle_Plus_V2_abc-if00-port0" }],
+    devices: [{ name: "ttyUSB0", subsystem: "tty", dev_path: "/dev/ttyUSB0", by_id: "/dev/serial/by-id/usb-Zigbee_Coordinator_USB_Dongle_0001-if00-port0" }],
     drives: [
-      { id: "wdc", vendor: "WDC", model: "WD8003FFBX-68B9AN0", serial: "X1", size: 8001563222016, connection_bus: "usb", removable: true,
-        filesystems: [{ device: "/dev/sda1", name: "NAS1", size: 8e12, system: false, mount_points: ["/media/NAS1"] }] },
-      { id: "sandisk", vendor: "SanDisk", model: "Extreme SSD", serial: "X2", size: 1000204886016, connection_bus: "usb", removable: true,
-        filesystems: [{ device: "/dev/sdb1", name: "MEDIA", size: 1e12, system: false, mount_points: ["/media/MEDIA"] }] },
+      { id: "media", vendor: "Generic", model: "USB 3.0 Disk", serial: "D1", size: 8001563222016, connection_bus: "usb", removable: true,
+        filesystems: [{ device: "/dev/sda1", name: "MEDIA", size: 8e12, system: false, mount_points: ["/media/MEDIA"] }] },
+      { id: "backup", vendor: "Generic", model: "Portable SSD", serial: "D2", size: 1000204886016, connection_bus: "usb", removable: true,
+        filesystems: [{ device: "/dev/sdb1", name: "BACKUP", size: 1e12, system: false, mount_points: ["/media/BACKUP"] }] },
     ],
   },
 };
@@ -153,8 +152,9 @@ const page = `<!doctype html><html><head><meta charset="utf-8"><style>
           }
           if (msg.endpoint.endsWith("/info")) {
             const slug = msg.endpoint.split("/")[2];
-            // Samba mounts the drive by label and publishes it on 445; Immich
-            // and Kiwix reach the same disk through that share. Fixtured this
+            // Samba mounts the drive by label and publishes it on 445;
+            // PhotoPrism, Jellyfin and Paperless reach the same disk through
+            // that share. Fixtured this
             // way so the screenshot shows the republish chain, which is the
             // part of the derivation that is hardest to describe in words.
             // The manifest fields are as close to the real add-ons' as the
@@ -162,21 +162,21 @@ const page = `<!doctype html><html><head><meta charset="utf-8"><style>
             // kind of service each one is, so a fixture that leaves them out
             // is a fixture that never exercises the decision.
             const ADDON_OPTIONS = {
-              "45df7312_zigbee2mqtt": { network: { "8099/tcp": 8099 }, ingress: true, options: { serial: { port: RESPONSES["/hardware/info"].devices[0].by_id }, mqtt: { server: "mqtt://core-mosquitto:1883" } } },
+              a0d7b954_zigbee2mqtt: { network: { "8099/tcp": 8099 }, ingress: true, options: { serial: { port: RESPONSES["/hardware/info"].devices[0].by_id }, mqtt: { server: "mqtt://core-mosquitto:1883" } } },
               core_mosquitto: { network: { "1883/tcp": 1883, "8883/tcp": 8883 }, services: ["mqtt:provide"], options: {} },
-              c9a35110_sambanas: { network: { "445/tcp": 445, "139/tcp": 139 }, map: ["config:rw", "addons:rw", "backup:rw", "share:rw", "ssl:ro"], options: { workgroup: "WORKGROUP", moredisks: ["NAS1"] } },
-              "3b88f413_immich": { network: { "3001/tcp": 8080 }, webui: "http://[HOST]:[PORT:3001]", options: { external_library: "/media/NAS1/photos" } },
-              beb500c8_immich_ml: { options: {} },
-              beb500c8_kiwix: { ingress: true, options: { zim_dir: "NAS1" } },
+              d1c2b3a4_samba_nas: { network: { "445/tcp": 445, "139/tcp": 139 }, map: ["config:rw", "addons:rw", "backup:rw", "share:rw", "ssl:ro"], options: { workgroup: "WORKGROUP", moredisks: ["MEDIA"] } },
+              d1c2b3a4_photoprism: { network: { "2342/tcp": 2342 }, webui: "http://[HOST]:[PORT:2342]", options: { originals: "/media/MEDIA/photos" } },
+              d1c2b3a4_thumbnailer: { options: {} },
+              d1c2b3a4_jellyfin: { network: { "8096/tcp": 8096 }, webui: "http://[HOST]:[PORT:8096]", options: { media_dir: "MEDIA" } },
               a0d7b954_adguard: { network: { "53/tcp": 53, "3000/tcp": 3000 }, options: {} },
-              a0d7b954_tailscale: { network: { "41641/udp": 41641 }, options: {} },
+              d1c2b3a4_tailscale: { network: { "41641/udp": 41641 }, options: {} },
               // Remotely managed, so its options say nothing and the routes
               // are only in the log - the case the log parser exists for.
-              "9074a9fa_cloudflared": { network: {}, options: { tunnel_token: "ey..." } },
-              beb500c8_wordpress: { network: { "80/tcp": 5051 }, webui: "http://[HOST]:[PORT:80]", options: {} },
-              beb500c8_pingvin_share: { network: { "3000/tcp": 8095 }, ingress: true, options: {} },
-              beb500c8_nas1_usb_watcher: { options: {} },
-              "7b7df7b9_claudecode": { ingress: true, map: ["homeassistant_config:rw", "addons:rw"], options: {} },
+              d1c2b3a4_cloudflared: { network: {}, options: { tunnel_token: "ey..." } },
+              d1c2b3a4_paperless: { network: { "8000/tcp": 8000 }, webui: "http://[HOST]:[PORT:8000]", options: { consume_dir: "/media/MEDIA/scans" } },
+              d1c2b3a4_uptime_kuma: { network: { "3001/tcp": 3001 }, ingress: true, options: {} },
+              d1c2b3a4_backup_watcher: { options: {} },
+              d1c2b3a4_portainer: { ingress: true, docker_api: true, options: {} },
               core_ssh: { network: { "22/tcp": 22 }, ingress: true, full_access: true, hassio_role: "manager", options: {} },
               core_configurator: { ingress: true, map: ["config:rw", "ssl:ro", "addons:rw"], options: {} },
               a0d7b954_nodered: { ingress: true, hassio_role: "manager", map: ["config:rw"], options: {} },

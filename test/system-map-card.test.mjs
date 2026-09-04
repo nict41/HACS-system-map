@@ -74,13 +74,13 @@ const T = (name, got, want) => {
 
 // --- fixture ---------------------------------------------------------------
 const DRIVE = {
-  id: "drive_liteon", vendor: "LITEON", model: "EP2", serial: "S1", size: 1900000000000,
+  id: "drive_media", vendor: "Generic", model: "USB 3.0 Disk", serial: "S1", size: 1900000000000,
   connection_bus: "usb", removable: true,
-  filesystems: [{ device: "/dev/sda1", name: "NAS1", size: 1e12, system: false, mount_points: ["/media/NAS1"] }],
+  filesystems: [{ device: "/dev/sda1", name: "MEDIA", size: 1e12, system: false, mount_points: ["/media/MEDIA"] }],
 };
 const DONGLE = {
   name: "ttyUSB0", subsystem: "tty", dev_path: "/dev/ttyUSB0",
-  by_id: "/dev/serial/by-id/usb-ITead_Sonoff_Zigbee_3.0_USB_Dongle_Plus_abc-if00-port0",
+  by_id: "/dev/serial/by-id/usb-Zigbee_Coordinator_USB_Dongle_0001-if00-port0",
 };
 
 function newCard(config = {}, opts = {}) {
@@ -98,16 +98,16 @@ function newCard(config = {}, opts = {}) {
 
   card._addons = [
     { slug: "core_mosquitto", name: "Mosquitto broker", state: "started" },
-    { slug: "45df7312_zigbee2mqtt", name: "Zigbee2MQTT", state: "started", update_available: true },
-    { slug: "c9a35110_sambanas", name: "Samba NAS", state: "started" },
-    { slug: "3b88f413_immich", name: "Immich", state: "started" },
-    { slug: "beb500c8_kiwix", name: "Kiwix", state: "started" },
+    { slug: "a0d7b954_zigbee2mqtt", name: "Zigbee2MQTT", state: "started", update_available: true },
+    { slug: "d1c2b3a4_samba_nas", name: "Samba NAS", state: "started" },
+    { slug: "d1c2b3a4_photoprism", name: "PhotoPrism", state: "started" },
+    { slug: "d1c2b3a4_jellyfin", name: "Jellyfin", state: "started" },
     { slug: "a0d7b954_adguard", name: "AdGuard Home", state: "started" },
-    { slug: "9074a9fa_cloudflared", name: "Cloudflared", state: "started" },
+    { slug: "d1c2b3a4_cloudflared", name: "Cloudflared", state: "started" },
     { slug: "a_spare", name: "Some Other Add-on", state: "stopped" },
   ];
   card._entries = [
-    { entry_id: "e_mjpeg", domain: "mjpeg", title: "3D Print Cam", state: "loaded", source: "user" },
+    { entry_id: "e_mjpeg", domain: "mjpeg", title: "Garage Cam", state: "loaded", source: "user" },
     { entry_id: "e_mqtt", domain: "mqtt", title: "Mosquitto", state: "loaded", source: "user" },
     { entry_id: "e_hue", domain: "hue", title: "Hue Bridge", state: "loaded", source: "user" },
     { entry_id: "e_off", domain: "spotify", title: "Spotify", state: "not_loaded", disabled_by: "user", source: "user" },
@@ -133,17 +133,17 @@ function newCard(config = {}, opts = {}) {
     },
   };
   card._hardware = { devices: [DONGLE, ...(opts.extraDevices || [])], drives: [DRIVE] };
-  // Samba addresses the disk by its filesystem *label* (moredisks: [NAS1]),
+  // Samba addresses the disk by its filesystem *label* (moredisks: [MEDIA]),
   // not by a path, and publishes it over SMB - so it is the mounter, and the
-  // add-ons that also reference NAS1 are reaching it through that share.
+  // add-ons that also reference MEDIA are reaching it through that share.
   card._addonInfoCache = new Map([
     ["core_mosquitto", { name: "Mosquitto broker", network: { "1883/tcp": 1883 }, options: {} }],
-    ["45df7312_zigbee2mqtt", { name: "Zigbee2MQTT", network: { "8099/tcp": 8099 }, options: { serial: { port: DONGLE.by_id }, mqtt: { server: "mqtt://core-mosquitto:1883" } } }],
-    ["c9a35110_sambanas", { name: "Samba NAS", network: { "445/tcp": 445, "139/tcp": 139 }, options: { workgroup: "WORKGROUP", moredisks: ["NAS1"] } }],
-    ["3b88f413_immich", { name: "Immich", network: { "3001/tcp": 8080 }, options: { external_library: "/media/NAS1/photos" } }],
-    ["beb500c8_kiwix", { name: "Kiwix", options: { zim_dir: "NAS1" } }],
+    ["a0d7b954_zigbee2mqtt", { name: "Zigbee2MQTT", network: { "8099/tcp": 8099 }, options: { serial: { port: DONGLE.by_id }, mqtt: { server: "mqtt://core-mosquitto:1883" } } }],
+    ["d1c2b3a4_samba_nas", { name: "Samba NAS", network: { "445/tcp": 445, "139/tcp": 139 }, options: { workgroup: "WORKGROUP", moredisks: ["MEDIA"] } }],
+    ["d1c2b3a4_photoprism", { name: "PhotoPrism", network: { "3001/tcp": 8080 }, options: { external_library: "/media/MEDIA/photos" } }],
+    ["d1c2b3a4_jellyfin", { name: "Jellyfin", options: { zim_dir: "MEDIA" } }],
     ["a0d7b954_adguard", { name: "AdGuard Home", network: { "53/tcp": 53, "3000/tcp": 3000 }, options: {} }],
-    ["9074a9fa_cloudflared", { name: "Cloudflared", network: {}, options: { tunnel_token: "ey...", external_hostname: "" } }],
+    ["d1c2b3a4_cloudflared", { name: "Cloudflared", network: {}, options: { tunnel_token: "ey...", external_hostname: "" } }],
     ["a_spare", { name: "Some Other Add-on", options: {} }],
     ...(opts.addonInfo || []),
   ]);
@@ -152,14 +152,14 @@ function newCard(config = {}, opts = {}) {
     core: { version: "2026.8.1", version_latest: "2026.9.0", update_available: true, arch: "amd64" },
     os: { version: "13.1", board: "generic-x86-64", update_available: false },
     supervisor: { version: "2026.08.0", channel: "stable" },
-    network: { host_internet: true, supervisor_internet: true, interfaces: [{ interface: "enp1s0", type: "ethernet", connected: true, primary: true, ipv4: { address: ["192.168.8.25/24"] } }] },
+    network: { host_internet: true, supervisor_internet: true, interfaces: [{ interface: "enp1s0", type: "ethernet", connected: true, primary: true, ipv4: { address: ["192.168.1.50/24"] } }] },
     backups: [{ slug: "b1", name: "Nightly", date: new Date(Date.now() - 20 * 864e5).toISOString(), size: 512 }],
   };
   card._issues = [{ domain: "hue", issue_id: "bridge_firmware", severity: "warning", is_fixable: true }];
   card._systemHealth = { mqtt: { info: { broker: "core-mosquitto", connected: true } } };
   card._logRoutes = opts.logRoutes ?? [
-    { hostname: "ha.example.com", service: "http://192.168.8.25:8123", source: "log", viaSlug: "9074a9fa_cloudflared" },
-    { hostname: "nas.example.com", service: "http://192.168.8.25:8080", source: "log", viaSlug: "9074a9fa_cloudflared" },
+    { hostname: "ha.example.com", service: "http://192.168.1.50:8123", source: "log", viaSlug: "d1c2b3a4_cloudflared" },
+    { hostname: "nas.example.com", service: "http://192.168.1.50:8080", source: "log", viaSlug: "d1c2b3a4_cloudflared" },
   ];
   card._derive();
   card._buildProblemIndex();
@@ -177,13 +177,13 @@ T("getStubConfig is the bare type", SystemMapCard.getStubConfig(), { type: "cust
 // --- hardware discovery ----------------------------------------------------
 const addonId = (slug) => `addon_${slug.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "")}`;
 const hw = (card = c) => card._derived.nodes.filter((n) => n.kind === "hardware");
-T("a drive and a serial dongle become nodes", hw().map((n) => n.label), ["LITEON EP2", "ITead Sonoff Zigbee 3.0"]);
-T("a drive carries its filesystem labels", hw()[0].labels, ["NAS1"]);
+T("a drive and a serial dongle become nodes", hw().map((n) => n.label), ["Generic USB 3.0 Disk", "Zigbee Coordinator USB Dongle"]);
+T("a drive carries its filesystem labels", hw()[0].labels, ["MEDIA"]);
 T("no discovered device lands on top of the host",
   hw().some((n) => Math.abs(n.x - 610) < 60 && n.y === 150), false);
 T("ownership is derived from the add-on's own nested options",
   c._derived.edges.filter((e) => e[0].startsWith("hw_tty")).map((e) => [e[1], e[2].label]),
-  [[addonId("45df7312_zigbee2mqtt"), "owns (serial.port)"]]);
+  [[addonId("a0d7b954_zigbee2mqtt"), "owns (serial.port)"]]);
 T("every discovered device hangs off the host",
   c._derived.edges.filter((e) => e[0] === "host").length, 2);
 // --- the Samba republish chain --------------------------------------------
@@ -192,27 +192,27 @@ const edgeLabels = (from, to) =>
   c._derived.edges.filter((e) => (!from || e[0] === from) && (!to || e[1] === to)).map((e) => e[2].label);
 
 T("a disk referenced by filesystem label, not path, is still matched",
-  drive().usedBy.find((u) => u.slug === "c9a35110_sambanas")?.option, "moredisks");
+  drive().usedBy.find((u) => u.slug === "d1c2b3a4_samba_nas")?.option, "moredisks");
 T("the SMB server owns the drive",
-  edgeLabels(drive().id, addonId("c9a35110_sambanas")), ["serves (moredisks)"]);
+  edgeLabels(drive().id, addonId("d1c2b3a4_samba_nas")), ["serves (moredisks)"]);
 // The share is a node of its own, so the chain reads disk -> exporter ->
 // share -> consumers rather than being implied by two edge labels.
 const shareNode = () => c._derived.nodes.find((n) => n.kind === "share");
 T("the exported share becomes a node",
   [shareNode()?.label, shareNode()?.tier, shareNode()?.servedBy],
-  ["NAS1 (SMB)", "services", "c9a35110_sambanas"]);
+  ["MEDIA (SMB)", "services", "d1c2b3a4_samba_nas"]);
 T("the exporting add-on is edged to the share it exports",
-  edgeLabels(addonId("c9a35110_sambanas"), shareNode().id), ["exports"]);
+  edgeLabels(addonId("d1c2b3a4_samba_nas"), shareNode().id), ["exports"]);
 T("consumers hang off the share, not the hardware",
-  [edgeLabels(drive().id, addonId("3b88f413_immich")), edgeLabels(shareNode().id, addonId("3b88f413_immich"))],
+  [edgeLabels(drive().id, addonId("d1c2b3a4_photoprism")), edgeLabels(shareNode().id, addonId("d1c2b3a4_photoprism"))],
   [[], ["mounts (external_library)"]]);
 T("a consumer referencing the bare label resolves the same way",
-  edgeLabels(shareNode().id, addonId("beb500c8_kiwix")), ["mounts (zim_dir)"]);
+  edgeLabels(shareNode().id, addonId("d1c2b3a4_jellyfin")), ["mounts (zim_dir)"]);
 T("a share takes the state of the add-on exporting it",
   (() => {
     const state = (addonState) => {
       const card = newCard();
-      card._addons.find((a) => a.slug === "c9a35110_sambanas").state = addonState;
+      card._addons.find((a) => a.slug === "d1c2b3a4_samba_nas").state = addonState;
       card._derive();
       return card._nodeState(card._derived.nodes.find((n) => n.kind === "share")).status;
     };
@@ -222,16 +222,16 @@ T("only one share node per exported share",
   c._derived.nodes.filter((n) => n.kind === "share").length, 1);
 T("the drive detail separates who mounts it from who reaches it over SMB",
   drive().usedBy.map((u) => [u.name, u.via, u.share]),
-  [["Samba NAS", null, null], ["Immich", "Samba NAS", "NAS1"], ["Kiwix", "Samba NAS", "NAS1"]]);
+  [["Samba NAS", null, null], ["PhotoPrism", "Samba NAS", "MEDIA"], ["Jellyfin", "Samba NAS", "MEDIA"]]);
 T("a serial device with one claimant is still a direct owns edge",
-  edgeLabels(c._derived.nodes.find((n) => n.id.startsWith("hw_tty")).id, addonId("45df7312_zigbee2mqtt")), ["owns (serial.port)"]);
+  edgeLabels(c._derived.nodes.find((n) => n.id.startsWith("hw_tty")).id, addonId("a0d7b954_zigbee2mqtt")), ["owns (serial.port)"]);
 
 // Without an SMB server in the picture, every claimant goes back to hanging
 // off the drive directly - the old behaviour, unchanged.
 T("no SMB server means direct edges for everyone",
   (() => {
     const plain = newCard();
-    plain._addonInfoCache.set("c9a35110_sambanas", { name: "Samba NAS", options: { moredisks: ["NAS1"] } });
+    plain._addonInfoCache.set("d1c2b3a4_samba_nas", { name: "Samba NAS", options: { moredisks: ["MEDIA"] } });
     plain._derive();
     const d = plain._derived.nodes.find((n) => n.id.startsWith("hw_drive"));
     return plain._derived.edges.filter((e) => e[0] === d.id).map((e) => e[2].label).sort();
@@ -250,11 +250,11 @@ T("a filesystem label under three characters is discarded",
   })(), []);
 T("a label must be the value or a path's last segment, not a substring",
   [
-    ctx.matchDeviceValue("NAS1", { labels: ["NAS1"], paths: [] }),
-    ctx.matchDeviceValue("/media/NAS1/photos", { labels: ["NAS1"], paths: ["/media/NAS1"] }),
-    ctx.matchDeviceValue("my NAS1 backup notes", { labels: ["NAS1"], paths: [] }),
+    ctx.matchDeviceValue("MEDIA", { labels: ["MEDIA"], paths: [] }),
+    ctx.matchDeviceValue("/media/MEDIA/photos", { labels: ["MEDIA"], paths: ["/media/MEDIA"] }),
+    ctx.matchDeviceValue("my MEDIA backup notes", { labels: ["MEDIA"], paths: [] }),
   ],
-  ["NAS1", "/media/NAS1", null]);
+  ["MEDIA", "/media/MEDIA", null]);
 T("servesSmb reads published ports, not the add-on name",
   [ctx.servesSmb({ network: { "445/tcp": 445 } }), ctx.servesSmb({ name: "samba", network: { "80/tcp": 80 } }), ctx.servesSmb(null)],
   [true, false, false]);
@@ -281,18 +281,18 @@ T("discovery off means no hardware nodes and no offset",
 const CLOUDFLARED_LOG = [
   "[13:58:22] INFO: Using Cloudflare Remote Management Tunnel",
   "[13:58:22] INFO: All app (add-on) configuration options except tunnel_token will be ignored.",
-  "2026-09-02T12:58:22Z INF Starting tunnel tunnelID=d159e957-5122-42c1-94f5-68964ac4a209",
+  "2026-09-02T12:58:22Z INF Starting tunnel tunnelID=8f1c0b2e-4a67-4d3b-9c05-1e2f3a4b5c6d",
   "2026-09-02T12:58:22Z INF Settings: map[metrics:0.0.0.0:36500 no-autoupdate:true token:*****]",
-  '2026-09-02T12:58:22Z INF Updated to new configuration config="{\\"ingress\\":[{\\"hostname\\":\\"ha.nicholastoo.com\\", \\"originRequest\\":{\\"noTLSVerify\\":true}, \\"service\\":\\"http://192.168.8.25:8123\\"}, {\\"hostname\\":\\"nas.nicholastoo.com\\", \\"originRequest\\":{}, \\"service\\":\\"http://192.168.8.25:8080\\"}, {\\"hostname\\":\\"share.nicholastoo.com\\", \\"service\\":\\"http://192.168.8.25:8095\\"}, {\\"service\\":\\"http_status:404\\"}], \\"warp-routing\\":{\\"enabled\\":false}}" version=15',
+  '2026-09-02T12:58:22Z INF Updated to new configuration config="{\\"ingress\\":[{\\"hostname\\":\\"ha.example.com\\", \\"originRequest\\":{\\"noTLSVerify\\":true}, \\"service\\":\\"http://192.168.1.50:8123\\"}, {\\"hostname\\":\\"nas.example.com\\", \\"originRequest\\":{}, \\"service\\":\\"http://192.168.1.50:8080\\"}, {\\"hostname\\":\\"share.example.com\\", \\"service\\":\\"http://192.168.1.50:8095\\"}, {\\"service\\":\\"http_status:404\\"}], \\"warp-routing\\":{\\"enabled\\":false}}" version=15',
   '2026-09-02T12:58:32Z INF precheck component="DNS Resolution" status=pass target=region1.v2.argotunnel.com',
 ].join("\n");
 
 T("ingress rules are read out of the log's escaped JSON",
   ctx.routesFromLog(CLOUDFLARED_LOG).map((r) => [r.hostname, r.service]),
   [
-    ["ha.nicholastoo.com", "http://192.168.8.25:8123"],
-    ["nas.nicholastoo.com", "http://192.168.8.25:8080"],
-    ["share.nicholastoo.com", "http://192.168.8.25:8095"],
+    ["ha.example.com", "http://192.168.1.50:8123"],
+    ["nas.example.com", "http://192.168.1.50:8080"],
+    ["share.example.com", "http://192.168.1.50:8095"],
   ]);
 T("the catch-all rule is not a route", ctx.routesFromLog(CLOUDFLARED_LOG).length, 3);
 T("a later configuration supersedes an earlier one",
@@ -305,7 +305,7 @@ T("a truncated config line is skipped rather than throwing",
 T("only an add-on holding a tunnel credential has its log read",
   [
     ctx.looksLikeIngressProvider({ tunnel_token: "ey...", external_hostname: "" }),
-    ctx.looksLikeIngressProvider({ workgroup: "WORKGROUP", moredisks: ["NAS1"] }),
+    ctx.looksLikeIngressProvider({ workgroup: "WORKGROUP", moredisks: ["MEDIA"] }),
     ctx.looksLikeIngressProvider({ serial: { port: "/dev/ttyUSB0" } }),
   ], [true, false, false]);
 T("a bare hostname option is a route to Home Assistant itself",
@@ -323,11 +323,11 @@ const tierOf = (card, slug) => card._node(addonId(slug))?.tier;
 T("a DNS server is network infrastructure, by its port",
   tierOf(c, "a0d7b954_adguard"), "network");
 T("an add-on with no recognised port is a service",
-  [tierOf(c, "3b88f413_immich"), tierOf(c, "beb500c8_kiwix")], ["services", "services"]);
+  [tierOf(c, "d1c2b3a4_photoprism"), tierOf(c, "d1c2b3a4_jellyfin")], ["services", "services"]);
 T("an add-on publishing hostnames for other things is remote access",
-  tierOf(c, "9074a9fa_cloudflared"), "remote");
+  tierOf(c, "d1c2b3a4_cloudflared"), "remote");
 T("an SMB server is still a service, not network infrastructure",
-  tierOf(c, "c9a35110_sambanas"), "services");
+  tierOf(c, "d1c2b3a4_samba_nas"), "services");
 T("the role read off the ports reaches the node's notes",
   c._node(addonId("core_mosquitto")).notes, ["Publishes MQTT broker"]);
 
@@ -336,27 +336,27 @@ T("the role read off the ports reaches the node's notes",
 T("a route to the host's LAN address on 8123 resolves to the host",
   c._routes.find((r) => r.hostname === "ha.example.com")?.targetId, "host");
 T("a route to the host's LAN address on an add-on's port resolves to that add-on",
-  c._routes.find((r) => r.hostname === "nas.example.com")?.targetId, addonId("3b88f413_immich"));
+  c._routes.find((r) => r.hostname === "nas.example.com")?.targetId, addonId("d1c2b3a4_photoprism"));
 T("the public URL lands on what the tunnel actually reaches",
-  [c._node("host").exposedUrl, c._node(addonId("3b88f413_immich")).exposedUrl],
+  [c._node("host").exposedUrl, c._node(addonId("d1c2b3a4_photoprism")).exposedUrl],
   ["https://ha.example.com", "https://nas.example.com"]);
 // The edge exists but carries no label: the target node already wears the
 // hostname, and printing it twice reads as two different facts.
 T("the tunnel is edged to what it exposes, without repeating the hostname",
   c._derived.edges
-    .filter((e) => e[0] === addonId("9074a9fa_cloudflared"))
+    .filter((e) => e[0] === addonId("d1c2b3a4_cloudflared"))
     .map((e) => [e[1], e[2].label ?? null])
     .sort(),
-  [["addon_3b88f413_immich", null], ["host", null]]);
+  [["addon_d1c2b3a4_photoprism", null], ["host", null]]);
 T("an unroutable rule exposes nothing",
   (() => {
-    const stray = newCard({}, { logRoutes: [{ hostname: "x.example.com", service: "http://10.9.9.9:80", viaSlug: "9074a9fa_cloudflared" }] });
+    const stray = newCard({}, { logRoutes: [{ hostname: "x.example.com", service: "http://10.9.9.9:80", viaSlug: "d1c2b3a4_cloudflared" }] });
     return stray._routes[0].targetId;
   })(), null);
 
 // Z2M's options name the broker: `mqtt://core-mosquitto:1883`.
 T("one add-on naming another in its options becomes an edge",
-  c._derived.edges.find((e) => e[0] === addonId("45df7312_zigbee2mqtt") && e[1] === addonId("core_mosquitto"))?.[2].label,
+  c._derived.edges.find((e) => e[0] === addonId("a0d7b954_zigbee2mqtt") && e[1] === addonId("core_mosquitto"))?.[2].label,
   "mqtt.server");
 T("an add-on is not edged to itself",
   c._derived.edges.every((e) => e[0] !== e[1]), true);
@@ -472,26 +472,26 @@ T("an option name alone does not move an add-on into remote access",
 T("a tunnel whose rules cannot be read is still remote access",
   await (async () => {
     const card = newCard({}, { logRoutes: [] });
-    card._addonInfoCache.set("9074a9fa_cloudflared", { name: "Cloudflared", network: {}, options: {} });
+    card._addonInfoCache.set("d1c2b3a4_cloudflared", { name: "Cloudflared", network: {}, options: {} });
     card._fetchAddonLog = async (slug) =>
-      slug === "9074a9fa_cloudflared"
+      slug === "d1c2b3a4_cloudflared"
         ? "INF Starting tunnel tunnelID=d159e957\nINF Registered tunnel connection connIndex=0"
         : "nothing of interest";
     await card._loadRouteLogs();
     card._derive();
-    const node = card._node(addonId("9074a9fa_cloudflared"));
+    const node = card._node(addonId("d1c2b3a4_cloudflared"));
     return [node.tier, node.routes, node.notes.at(-1)];
   })(),
   ["remote", undefined, "Identified as a way in from outside, but none of its routes could be read"]);
 T("and it is still one hop from the outside, labelled for what it is",
   await (async () => {
     const card = newCard({}, { logRoutes: [] });
-    card._addonInfoCache.set("9074a9fa_cloudflared", { name: "Cloudflared", network: {}, options: {} });
-    card._fetchAddonLog = async (slug) => (slug === "9074a9fa_cloudflared" ? "INF tunnelID=abc" : "");
+    card._addonInfoCache.set("d1c2b3a4_cloudflared", { name: "Cloudflared", network: {}, options: {} });
+    card._fetchAddonLog = async (slug) => (slug === "d1c2b3a4_cloudflared" ? "INF tunnelID=abc" : "");
     await card._loadRouteLogs();
     card._derive();
     return card._derived.edges.filter((e) => e[0] === "internet").map((e) => [e[1], e[2].label]);
-  })(), [[addonId("9074a9fa_cloudflared"), "tunnel"]]);
+  })(), [[addonId("d1c2b3a4_cloudflared"), "tunnel"]]);
 T("the markers are narrow enough not to catch ordinary add-ons",
   [
     ctx.looksLikeTunnelLog("INF Starting tunnel tunnelID=abc"),
@@ -502,7 +502,7 @@ T("the markers are narrow enough not to catch ordinary add-ons",
     ctx.looksLikeTunnelLog("nothing to see here"),
   ], [true, true, true, false, false, false]);
 T("a readable tunnel still reports its hostnames rather than the fallback note",
-  c._node(addonId("9074a9fa_cloudflared")).routes.length, 2);
+  c._node(addonId("d1c2b3a4_cloudflared")).routes.length, 2);
 
 // --- route resolution, step by step ----------------------------------------
 // A private address is this machine whatever /network/info said. Depending on
@@ -511,7 +511,7 @@ T("a readable tunnel still reports its hostnames rather than the fallback note",
 // and none of them landing.
 T("a private address is recognised without help from /network/info",
   [
-    ctx.isPrivateAddress("192.168.8.25"), ctx.isPrivateAddress("10.0.0.4"),
+    ctx.isPrivateAddress("192.168.1.50"), ctx.isPrivateAddress("10.0.0.4"),
     ctx.isPrivateAddress("172.30.33.4"), ctx.isPrivateAddress("127.0.0.1"),
     ctx.isPrivateAddress("172.15.0.1"), ctx.isPrivateAddress("8.8.8.8"),
   ], [true, true, true, true, false, false]);
@@ -521,7 +521,7 @@ T("a rule resolves even when the network endpoint told us nothing",
     blind._system.network = null; // /network/info failed or was empty
     blind._derive();
     return blind._routes.find((r) => r.hostname === "nas.example.com")?.targetId;
-  })(), addonId("3b88f413_immich"));
+  })(), addonId("d1c2b3a4_photoprism"));
 
 T("every rule records why it landed where it did",
   c._routes.map((r) => [r.hostname, r.trace.reason]),
@@ -532,15 +532,15 @@ T("every rule records why it landed where it did",
 T("an unmatched rule says what it was looking for and what was on offer",
   (() => {
     const stray = newCard({}, {
-      logRoutes: [{ hostname: "x.example.com", service: "http://192.168.8.25:7777", viaSlug: "9074a9fa_cloudflared" }],
+      logRoutes: [{ hostname: "x.example.com", service: "http://192.168.1.50:7777", viaSlug: "d1c2b3a4_cloudflared" }],
     });
     const t = stray._routes[0].trace;
-    return [t.reason, t.port, t.local, t.candidates.some((line) => line.startsWith("Immich:"))];
+    return [t.reason, t.port, t.local, t.candidates.some((line) => line.startsWith("PhotoPrism:"))];
   })(), ["no add-on reports port 7777", 7777, true, true]);
 T("a rule pointing off this machine says so rather than failing silently",
   (() => {
     const off = newCard({}, {
-      logRoutes: [{ hostname: "y.example.com", service: "http://203.0.113.9:80", viaSlug: "9074a9fa_cloudflared" }],
+      logRoutes: [{ hostname: "y.example.com", service: "http://203.0.113.9:80", viaSlug: "d1c2b3a4_cloudflared" }],
     });
     return off._routes[0].trace.reason;
   })(), "203.0.113.9 is not this machine, so the rule points somewhere else");
@@ -550,12 +550,12 @@ T("a rule pointing off this machine says so rather than failing silently",
 T("logs are scanned even when no add-on's options look like a tunnel",
   await (async () => {
     const card = newCard();
-    card._addonInfoCache.set("9074a9fa_cloudflared", { name: "Cloudflared", network: {}, options: {} });
+    card._addonInfoCache.set("d1c2b3a4_cloudflared", { name: "Cloudflared", network: {}, options: {} });
     const read = [];
     card._fetchAddonLog = async (slug) => {
       read.push(slug);
-      return slug === "9074a9fa_cloudflared"
-        ? 'INF config="{\\"ingress\\":[{\\"hostname\\":\\"found.example.com\\", \\"service\\":\\"http://192.168.8.25:8080\\"}]}"'
+      return slug === "d1c2b3a4_cloudflared"
+        ? 'INF config="{\\"ingress\\":[{\\"hostname\\":\\"found.example.com\\", \\"service\\":\\"http://192.168.1.50:8080\\"}]}"'
         : "nothing";
     };
     await card._loadRouteLogs();
@@ -567,11 +567,11 @@ T("the cheap path is still the usual one",
     const read = [];
     card._fetchAddonLog = async (slug) => {
       read.push(slug);
-      return 'INF config="{\\"ingress\\":[{\\"hostname\\":\\"a.example.com\\", \\"service\\":\\"http://192.168.8.25:8080\\"}]}"';
+      return 'INF config="{\\"ingress\\":[{\\"hostname\\":\\"a.example.com\\", \\"service\\":\\"http://192.168.1.50:8080\\"}]}"';
     };
     await card._loadRouteLogs();
     return [card._routeScan.fallback, read];
-  })(), [false, ["9074a9fa_cloudflared"]]);
+  })(), [false, ["d1c2b3a4_cloudflared"]]);
 
 // --- cards -----------------------------------------------------------------
 T("a node is drawn as a card, with the hostname as its own pill",
@@ -602,7 +602,7 @@ T("a card records its own box, so labels and panning use the real shape",
   (() => {
     const card = newCard();
     card._renderGraph();
-    const pos = card._nodePositions.get(`node:${addonId("3b88f413_immich")}`);
+    const pos = card._nodePositions.get(`node:${addonId("d1c2b3a4_photoprism")}`);
     return [pos.w, pos.h];
   })(), [148, 144]);
 T("the host card is the larger one",
@@ -616,8 +616,8 @@ T("the host card is the larger one",
 T("a long name wraps rather than overflowing",
   ctx.wrapLabel("Advanced SSH & Web Terminal", 17), ["Advanced SSH &", "Web Terminal"]);
 T("a name too long for two lines is truncated, not dropped",
-  ctx.wrapLabel("Immich Machine Learning OpenVINO Extended Edition", 17).length, 2);
-T("a short name stays on one line", ctx.wrapLabel("Kiwix", 17), ["Kiwix"]);
+  ctx.wrapLabel("PhotoPrism Machine Learning OpenVINO Extended Edition", 17).length, 2);
+T("a short name stays on one line", ctx.wrapLabel("Jellyfin", 17), ["Jellyfin"]);
 T("an empty name does not produce a broken line", ctx.wrapLabel("", 17), [""]);
 
 // --- add-on icons ----------------------------------------------------------
@@ -653,10 +653,10 @@ T("a failure to sign leaves the derived icon in place rather than a blank",
 T("the add-on's own icon is drawn when there is one, and the derived one when not",
   (() => {
     const card = newCard();
-    card._addonIcons.set("3b88f413_immich", "/api/hassio/addons/3b88f413_immich/icon?authSig=xyz");
+    card._addonIcons.set("d1c2b3a4_photoprism", "/api/hassio/addons/d1c2b3a4_photoprism/icon?authSig=xyz");
     card._renderGraph();
     const svg = card._els.get(".smc-graph").innerHTML;
-    return [svg.includes("<image href=\"/api/hassio/addons/3b88f413_immich/icon?authSig=xyz\""), svg.includes("clip-path=\"url(#smc-icon-clip)\"")];
+    return [svg.includes("<image href=\"/api/hassio/addons/d1c2b3a4_photoprism/icon?authSig=xyz\""), svg.includes("clip-path=\"url(#smc-icon-clip)\"")];
   })(), [true, true]);
 
 // --- host networking -------------------------------------------------------
@@ -677,22 +677,22 @@ T("no evidence at all means no ports, not a guess",
 
 T("a host-networked Samba is still recognised as an SMB server",
   [
-    ctx.servesSmb({ network: null, options: { workgroup: "WORKGROUP", moredisks: ["NAS1"] } }),
+    ctx.servesSmb({ network: null, options: { workgroup: "WORKGROUP", moredisks: ["MEDIA"] } }),
     ctx.servesSmb({ network: { "445/tcp": 445 }, options: {} }),
     ctx.servesSmb({ network: null, options: { workgroup_size: 4 } }),
-    ctx.servesSmb({ network: null, options: { zim_dir: "NAS1" } }),
+    ctx.servesSmb({ network: null, options: { zim_dir: "MEDIA" } }),
   ], [true, true, false, false]);
 
 T("a host-networked exporter still produces the share and its consumers",
   (() => {
     const hostNet = newCard();
-    hostNet._addonInfoCache.set("c9a35110_sambanas", {
-      name: "Samba NAS", network: null, options: { workgroup: "WORKGROUP", moredisks: ["NAS1"] },
+    hostNet._addonInfoCache.set("d1c2b3a4_samba_nas", {
+      name: "Samba NAS", network: null, options: { workgroup: "WORKGROUP", moredisks: ["MEDIA"] },
     });
     hostNet._derive();
     const share = hostNet._derived.nodes.find((n) => n.kind === "share");
     return [share?.label, hostNet._derived.edges.filter((e) => e[0] === share?.id).length];
-  })(), ["NAS1 (SMB)", 2]);
+  })(), ["MEDIA (SMB)", 2]);
 
 // Attributing every unresolved rule to Home Assistant put someone else's
 // subdomain on the host and left the real add-on with no hostname at all.
@@ -701,30 +701,30 @@ T("only Home Assistant's own port resolves to Home Assistant",
     const card = newCard();
     const addons = card._derived.nodes.filter((n) => n.kind === "addon");
     return [
-      card._resolveService("http://192.168.8.25:8123", addons)?.id,
-      card._resolveService("http://192.168.8.25:9999", addons),
+      card._resolveService("http://192.168.1.50:8123", addons)?.id,
+      card._resolveService("http://192.168.1.50:9999", addons),
     ];
   })(), ["host", null]);
 T("a rule pointing at an add-on's own container address resolves to it",
   (() => {
     const card = newCard();
-    card._addonInfoCache.get("3b88f413_immich").ip_address = "172.30.33.9";
+    card._addonInfoCache.get("d1c2b3a4_photoprism").ip_address = "172.30.33.9";
     card._derive();
     const addons = card._derived.nodes.filter((n) => n.kind === "addon");
     return card._resolveService("http://172.30.33.9:3001", addons)?.id;
-  })(), addonId("3b88f413_immich"));
+  })(), addonId("d1c2b3a4_photoprism"));
 
 // Even when a rule cannot be attributed, the hostname must still be visible.
 T("a tunnel wears its hostnames whether or not they resolve",
   (() => {
     const stray = newCard({}, {
       logRoutes: [
-        { hostname: "a.example.com", service: "http://192.168.8.25:8080", viaSlug: "9074a9fa_cloudflared" },
-        { hostname: "b.example.com", service: "http://192.168.8.25:9999", viaSlug: "9074a9fa_cloudflared" },
+        { hostname: "a.example.com", service: "http://192.168.1.50:8080", viaSlug: "d1c2b3a4_cloudflared" },
+        { hostname: "b.example.com", service: "http://192.168.1.50:9999", viaSlug: "d1c2b3a4_cloudflared" },
       ],
     });
-    const tunnel = stray._node(addonId("9074a9fa_cloudflared"));
-    return [tunnel.routes.length, stray._nodeState(tunnel).sub, tunnel.notes.includes("b.example.com → http://192.168.8.25:9999")];
+    const tunnel = stray._node(addonId("d1c2b3a4_cloudflared"));
+    return [tunnel.routes.length, stray._nodeState(tunnel).sub, tunnel.notes.includes("b.example.com → http://192.168.1.50:9999")];
   })(), [2, "2 hostnames · 1 unmatched", true]);
 
 // --- the boundary ----------------------------------------------------------
@@ -736,19 +736,19 @@ T("the outside world is drawn as a node once anything is reachable from it",
   ["Internet", "remote", "OUTSIDE"]);
 T("every entry point is one hop from the outside",
   c._derived.edges.filter((e) => e[0] === "internet").map((e) => [e[1], e[2].label]),
-  [[addonId("9074a9fa_cloudflared"), "2 hostnames"]]);
+  [[addonId("d1c2b3a4_cloudflared"), "2 hostnames"]]);
 T("a VPN add-on is an entry point even with no hostnames",
   (() => {
     const vpn = newCard({}, { logRoutes: [] });
-    vpn._addons.push({ slug: "a0d7b954_tailscale", name: "Tailscale", state: "started" });
-    vpn._addonInfoCache.set("a0d7b954_tailscale", { name: "Tailscale", network: { "41641/udp": 41641 }, options: {} });
+    vpn._addons.push({ slug: "d1c2b3a4_tailscale", name: "Tailscale", state: "started" });
+    vpn._addonInfoCache.set("d1c2b3a4_tailscale", { name: "Tailscale", network: { "41641/udp": 41641 }, options: {} });
     vpn._derive();
     return vpn._derived.edges.filter((e) => e[0] === "internet").map((e) => e[2].label);
   })(), ["VPN"]);
 T("no way in means no boundary node - nothing to assert",
   (() => {
     const closed = newCard({}, { logRoutes: [] });
-    closed._addons = closed._addons.filter((a) => a.slug !== "9074a9fa_cloudflared");
+    closed._addons = closed._addons.filter((a) => a.slug !== "d1c2b3a4_cloudflared");
     closed._derive();
     return internet(closed);
   })(), undefined);
@@ -759,11 +759,11 @@ T("the boundary counts the ways in and the hostnames behind them",
 // "On the LAN" and "also public" are different facts, so both get a line.
 T("an exposed service shows its LAN address and its public hostname",
   (() => {
-    const node = c._node(addonId("3b88f413_immich"));
+    const node = c._node(addonId("d1c2b3a4_photoprism"));
     return [node.badge, c._nodeState(node).subs];
-  })(), ["nas.example.com", ["192.168.8.25:8080", "nas.example.com"]]);
+  })(), ["nas.example.com", ["192.168.1.50:8080", "nas.example.com"]]);
 // Asserted as a rule over every node rather than for one add-on, because
-// "it works for Immich" was true while the host, a host-networked Samba and
+// "it works for PhotoPrism" was true while the host, a host-networked Samba and
 // the share itself all showed nothing.
 T("every node with a resolved route shows that hostname",
   c._derived.nodes
@@ -776,23 +776,23 @@ T("every node we know an address for shows it",
     .filter((n) => !c._nodeState(n).subs.includes(n.lan))
     .map((n) => n.label), []);
 T("Home Assistant shows its own LAN address, not only its public name",
-  c._nodeState(c._node("host")).subs, ["192.168.8.25:8123", "ha.example.com"]);
+  c._nodeState(c._node("host")).subs, ["192.168.1.50:8123", "ha.example.com"]);
 T("a host-networked SMB server still gets an address, from the protocol",
   (() => {
     const hostNet = newCard();
-    hostNet._addonInfoCache.set("c9a35110_sambanas", {
-      name: "Samba NAS", network: null, options: { workgroup: "WG", moredisks: ["NAS1"] },
+    hostNet._addonInfoCache.set("d1c2b3a4_samba_nas", {
+      name: "Samba NAS", network: null, options: { workgroup: "WG", moredisks: ["MEDIA"] },
     });
     hostNet._derive();
-    return hostNet._nodeState(hostNet._node(addonId("c9a35110_sambanas"))).subs;
-  })(), ["192.168.8.25:445"]);
+    return hostNet._nodeState(hostNet._node(addonId("d1c2b3a4_samba_nas"))).subs;
+  })(), ["192.168.1.50:445"]);
 T("a share shows the address you would actually type",
-  c._nodeState(c._derived.nodes.find((n) => n.kind === "share")).subs, ["\\\\192.168.8.25\\NAS1"]);
+  c._nodeState(c._derived.nodes.find((n) => n.kind === "share")).subs, ["\\\\192.168.1.50\\MEDIA"]);
 
 T("a LAN-only service shows just its address",
-  c._nodeState(c._node(addonId("core_mosquitto"))).subs.includes("192.168.8.25:1883"), true);
+  c._nodeState(c._node(addonId("core_mosquitto"))).subs.includes("192.168.1.50:1883"), true);
 T("a service with no reachable port shows neither",
-  c._nodeState(c._node(addonId("beb500c8_kiwix"))).subs.some((l) => l.includes(":")), false);
+  c._nodeState(c._node(addonId("d1c2b3a4_jellyfin"))).subs.some((l) => l.includes(":")), false);
 T("a problem still comes first",
   c._nodeState(c._node(addonId("core_mosquitto"))).subs[0], "1/2 unavailable");
 T("no more than three lines are ever drawn under a node",
@@ -801,7 +801,7 @@ T("Home Assistant itself wears the hostname routed to port 8123",
   [c._node("host").badge, c._node("host").exposedUrl],
   ["ha.example.com", "https://ha.example.com"]);
 T("a node with no route has no hostname badge",
-  c._node(addonId("beb500c8_kiwix")).badge, undefined);
+  c._node(addonId("d1c2b3a4_jellyfin")).badge, undefined);
 T("the status bar says how much is reachable from outside",
   (() => {
     const item = c._statusItems().find((i) => i.key === "exposed");
@@ -809,18 +809,18 @@ T("the status bar says how much is reachable from outside",
   })(), ["2 hostnames", true]);
 
 // --- reading services out of a log -----------------------------------------
-// Immich announces its machine-learning sidecar at runtime rather than in its
-// options: "Machine learning server became healthy (http://192.168.8.25:3004)".
+// PhotoPrism announces its machine-learning sidecar at runtime rather than in its
+// options: "Machine learning server became healthy (http://192.168.1.50:3004)".
 const IMMICH_LOG = [
-  "[Nest] LOG [Api:Bootstrap] Immich Server is listening on http://127.0.0.1:2283 [v3.1.0] [production]",
-  "[Nest] LOG [Api:MachineLearningRepository] Machine learning server became healthy (http://192.168.8.25:3004).",
-  "[Nest] LOG [Microservices:MachineLearningRepository] Machine learning server became healthy (http://192.168.8.25:3004).",
+  "[Nest] LOG [Api:Bootstrap] PhotoPrism Server is listening on http://127.0.0.1:2283 [v3.1.0] [production]",
+  "[Nest] LOG [Api:MachineLearningRepository] Machine learning server became healthy (http://192.168.1.50:3004).",
+  "[Nest] LOG [Microservices:MachineLearningRepository] Machine learning server became healthy (http://192.168.1.50:3004).",
   '[Nest] LOG [Api:StorageService] Verifying system mount folder checks: {"mountChecks":{"library":true}}',
 ].join("\n");
 
 T("host:port endpoints are read out of a log and deduplicated",
   ctx.servicesFromLog(IMMICH_LOG).map((d) => d.service),
-  ["http://127.0.0.1:2283", "http://192.168.8.25:3004"]);
+  ["http://127.0.0.1:2283", "http://192.168.1.50:3004"]);
 // A URL carrying credentials is skipped outright rather than stripped: the
 // map is not worth the risk of rendering a secret someone logged.
 T("a URL with embedded credentials is ignored entirely",
@@ -833,20 +833,20 @@ T("a log with no endpoints yields nothing", ctx.servicesFromLog("nothing here"),
 T("an endpoint named in a log becomes an edge to the add-on serving that port",
   (() => {
     const dial = newCard({ scan_service_logs: true });
-    dial._addons.push({ slug: "beb500c8_immich_ml", name: "Immich ML", state: "started" });
-    dial._addonInfoCache.set("beb500c8_immich_ml", { name: "Immich ML", network: { "3003/tcp": 3004 }, options: {} });
-    dial._logServices = [{ service: "http://192.168.8.25:3004", host: "192.168.8.25", port: 3004, fromSlug: "3b88f413_immich" }];
+    dial._addons.push({ slug: "d1c2b3a4_thumbnailer", name: "Thumbnail worker", state: "started" });
+    dial._addonInfoCache.set("d1c2b3a4_thumbnailer", { name: "Thumbnail worker", network: { "3003/tcp": 3004 }, options: {} });
+    dial._logServices = [{ service: "http://192.168.1.50:3004", host: "192.168.1.50", port: 3004, fromSlug: "d1c2b3a4_photoprism" }];
     dial._derive();
     return dial._derived.edges
-      .filter((e) => e[0] === addonId("3b88f413_immich") && e[1] === addonId("beb500c8_immich_ml"))
+      .filter((e) => e[0] === addonId("d1c2b3a4_photoprism") && e[1] === addonId("d1c2b3a4_thumbnailer"))
       .map((e) => e[2].label);
   })(), [":3004 (log)"]);
 T("an endpoint that resolves to the host itself is not drawn",
   (() => {
     const dial = newCard({ scan_service_logs: true });
-    dial._logServices = [{ service: "http://192.168.8.25:8123", host: "192.168.8.25", port: 8123, fromSlug: "3b88f413_immich" }];
+    dial._logServices = [{ service: "http://192.168.1.50:8123", host: "192.168.1.50", port: 8123, fromSlug: "d1c2b3a4_photoprism" }];
     dial._derive();
-    return dial._derived.edges.some((e) => e[0] === addonId("3b88f413_immich") && e[1] === "host");
+    return dial._derived.edges.some((e) => e[0] === addonId("d1c2b3a4_photoprism") && e[1] === "host");
   })(), false);
 
 // --- the evidence panel ----------------------------------------------------
@@ -916,7 +916,7 @@ T("open repairs surface in the bar", status.repairs.value, "1 open");
 // --- rendering -------------------------------------------------------------
 c._renderGraph();
 const svg = c._els.get(".smc-graph").innerHTML;
-T("discovered hardware is drawn", svg.includes('data-node="hw_drive_drive_liteon"'), true);
+T("discovered hardware is drawn", svg.includes('data-node="hw_drive_drive_media"'), true);
 T("a flagged node gets the problem class", svg.includes("smc-problem"), true);
 // The invariant is "nothing on this instance is missing from the map", not
 // "one circle per config entry" - the map draws one node per integration now.
@@ -1013,7 +1013,7 @@ const updatesFor = (states, addons) => {
 T("an add-on update reported by both routes counts once",
   updatesFor(
     { "update.zigbee2mqtt_update": { state: "on", attributes: { friendly_name: "Zigbee2MQTT Update" } } },
-    [{ slug: "45df7312_zigbee2mqtt", name: "Zigbee2MQTT", update_available: true }]
+    [{ slug: "a0d7b954_zigbee2mqtt", name: "Zigbee2MQTT", update_available: true }]
   ),
   ["Zigbee2MQTT"]);
 T("the trailing word is stripped from the display name",
@@ -1026,7 +1026,7 @@ T("genuinely different updates are all counted",
       "update.core": { state: "on", attributes: { friendly_name: "Home Assistant Core Update" } },
       "update.quiet": { state: "off", attributes: { friendly_name: "Not Pending" } },
     },
-    [{ slug: "45df7312_zigbee2mqtt", name: "Zigbee2MQTT", update_available: true }]
+    [{ slug: "a0d7b954_zigbee2mqtt", name: "Zigbee2MQTT", update_available: true }]
   ).sort(),
   ["Home Assistant Core", "Zigbee2MQTT"]);
 T("nothing pending is an empty list", updatesFor({}, []), []);
@@ -1039,7 +1039,7 @@ T("labels converging on one point are separated",
       [
         { text: "serves (moredisks)", x: 600, y: 200 },
         { text: "admin access", x: 600, y: 200 },
-        { text: "NAS1 (SMB loop)", x: 600, y: 200 },
+        { text: "MEDIA (SMB loop)", x: 600, y: 200 },
       ],
       []
     );
@@ -1362,7 +1362,7 @@ T("the export no longer builds a stylesheet at all",
 // it was unanswerable: selecting a node opened a panel and left two dozen
 // identical grey lines on screen.
 
-const SHARE = "share_c9a35110_sambanas_nas1"; // exported by Samba, mounted by Immich and Kiwix
+const SHARE = "share_d1c2b3a4_samba_nas_media"; // exported by Samba, mounted by PhotoPrism and Jellyfin
 const focused = (() => {
   const card = newCard();
   card._openDetail("node", SHARE);
@@ -1377,7 +1377,7 @@ T("an edge that does not touch the selection is dimmed, not hot",
   // host->disk is nowhere near the share, so it must be one of the dimmed ones.
   /<line class="smc-edge[^"]*smc-dim"/.test(focusedSvg), true);
 T("the selected node and its neighbours stay lit",
-  [SHARE, "addon_c9a35110_sambanas", "addon_3b88f413_immich", "addon_beb500c8_kiwix"].map((id) =>
+  [SHARE, "addon_d1c2b3a4_samba_nas", "addon_d1c2b3a4_photoprism", "addon_d1c2b3a4_jellyfin"].map((id) =>
     new RegExp(`class="[^"]*smc-hi[^"]*" data-node="${id}"`).test(focusedSvg)
   ), [true, true, true, true]);
 T("a node with no connection to the selection is dimmed",
@@ -1705,7 +1705,7 @@ T("every node is focusable and named",
     return [groups.length > 0, groups.every((g) => g.includes('tabindex="0"') && g.includes("aria-label="))];
   })(), [true, true]);
 T("a node's accessible name carries its facts, not just its id",
-  /aria-label="[^"]*192\.168\.8\.25/.test(a11y), true);
+  /aria-label="[^"]*192\.168\.1\.50/.test(a11y), true);
 T("the icon-only controls have accessible names",
   ["Refresh", "Zoom in", "Zoom out", "Fit to view", "Download as PNG"].every((l) => src.includes(`aria-label="${l}"`)),
   true);
@@ -1747,7 +1747,7 @@ T("with an address it still shows address and port",
     const card = newCard();
     card._derive();
     return card._derived.nodes.find((n) => n.kind === "host").lan;
-  })(), "192.168.8.25:8123");
+  })(), "192.168.1.50:8123");
 
 // Selecting a config entry from the list below the map has to light its
 // integration up there: the entry itself is no longer a node, so focusing it
@@ -1858,20 +1858,20 @@ function groupedCard(extra = {}) {
   card._addons = [
     { slug: "a_samba", name: "Samba NAS", state: "started" },
     { slug: "a_mqtt", name: "Mosquitto", state: "started" },
-    { slug: "a_immich", name: "Immich", state: "started" },
+    { slug: "a_immich", name: "PhotoPrism", state: "started" },
     { slug: "a_firefox", name: "Firefox", state: "started" },
     { slug: "a_portainer", name: "Portainer", state: "started" },
     { slug: "a_ssh", name: "Terminal & SSH", state: "started" },
-    { slug: "a_sidecar", name: "Immich ML", state: "started" },
+    { slug: "a_sidecar", name: "Thumbnail worker", state: "started" },
   ];
   card._addonInfoCache = new Map([
     ["a_samba", { name: "Samba NAS", network: { "445/tcp": 445 }, options: { workgroup: "WORKGROUP" }, map: ["config:rw"] }],
     ["a_mqtt", { name: "Mosquitto", network: { "1883/tcp": 1883 }, options: {} }],
-    ["a_immich", { name: "Immich", network: { "3001/tcp": 8080 }, ingress: true, options: {} }],
+    ["a_immich", { name: "PhotoPrism", network: { "3001/tcp": 8080 }, ingress: true, options: {} }],
     ["a_firefox", { name: "Firefox", ingress: true, options: {} }],
     ["a_portainer", { name: "Portainer", docker_api: true, ingress: true, options: {} }],
     ["a_ssh", { name: "Terminal & SSH", network: { "22/tcp": 22 }, full_access: true, options: {} }],
-    ["a_sidecar", { name: "Immich ML", options: {} }],
+    ["a_sidecar", { name: "Thumbnail worker", options: {} }],
   ]);
   card._derive();
   return card;
@@ -2045,7 +2045,7 @@ T("a tunnel with no rules found says so in the status bar",
   (() => {
     const card = newCard();
     card._routes = [];
-    card._tunnelSlugs = new Set(["9074a9fa_cloudflared"]);
+    card._tunnelSlugs = new Set(["d1c2b3a4_cloudflared"]);
     const item = card._statusItems().find((i) => i.key === "exposed");
     return [item?.value, item?.tone, /logs its rules once/.test(item?.note || "")];
   })(), ["rules not found", "warn", true]);
@@ -2062,7 +2062,7 @@ T("an add-on promoted to remote access drops its service category",
   (() => {
     const card = newCard();
     card._derive();
-    const cf = card._derived.nodes.find((n) => n.slug === "9074a9fa_cloudflared");
+    const cf = card._derived.nodes.find((n) => n.slug === "d1c2b3a4_cloudflared");
     return [cf.tier, cf.category ?? null];
   })(), ["remote", null]);
 

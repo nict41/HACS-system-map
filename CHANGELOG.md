@@ -422,7 +422,7 @@ both silent:
   the rule names, every rule was rejected as "somewhere else" and no service
   got a hostname. Any private address (RFC1918, loopback, link-local, unique
   local IPv6) is now recognised as this machine on its own merits - a tunnel
-  ingress rule pointing at `192.168.8.25` needs no corroboration.
+  ingress rule pointing at `192.168.1.50` needs no corroboration.
 - **A remotely-managed tunnel can have empty options**, since it is
   configured entirely outside Home Assistant. Log reading was gated on an
   add-on's options naming a tunnel, so such an add-on was skipped and its
@@ -457,7 +457,7 @@ built for one add-on:
   implies its own port, and SMB is 445 wherever it runs. Any add-on whose
   role is known now falls back to that role's port.
 - **The share node** named the add-on serving it but not where to reach it.
-  It now shows the address you would actually type, `\\192.168.8.25\NAS1`.
+  It now shows the address you would actually type, `\\192.168.1.50\NAS1`.
 
 Both rules are now asserted over every node rather than for a named add-on,
 since "it works for Immich" was true the whole time these three were blank.
@@ -477,7 +477,7 @@ since "it works for Immich" was true the whole time these three were blank.
   derived from what it does.
 - **Local and public reachability are both on the map.** "On the LAN" and
   "also reachable from outside" are different facts, so each gets a line
-  under the node: Immich reads `192.168.8.25:8080` and `nas.example.com`, one
+  under the node: Immich reads `192.168.1.50:8080` and `nas.example.com`, one
   above the other. A problem still takes the first line, since that outranks
   both.
 
@@ -580,7 +580,7 @@ node, and no hostnames on anything".
 - **Service links from logs** (`scan_service_logs`, off by default). An
   add-on often announces what it depends on at runtime rather than in its
   options - Immich reports its machine-learning sidecar as "became healthy
-  (http://192.168.8.25:3004)" - and that host:port resolves to another add-on
+  (http://192.168.1.50:3004)" - and that host:port resolves to another add-on
   exactly as a tunnel's ingress rule does. Off by default because it means
   reading every running add-on's whole log. Only the host and port are ever
   taken from a log line, and a URL carrying credentials is skipped outright
