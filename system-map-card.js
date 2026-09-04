@@ -112,7 +112,7 @@
 // version in the console is always the version of the file that's running -
 // which is the first thing worth knowing when a dashboard misbehaves after
 // an update, and the quickest way to catch a stale browser cache.
-const VERSION = "1.15.0";
+const VERSION = "1.15.1";
 
 console.info(
   `%c SYSTEM-MAP-CARD %c v${VERSION} `,
@@ -1229,17 +1229,46 @@ class SystemMapCard extends HTMLElement {
     }
   }
 
-  getCardSize() {
-    return 22;
+  // Roughly how tall the card wants to be, in pixels. Both size hints below
+  // are derived from this rather than fixed, because a fixed hint is what
+  // makes a taller map overflow: Lovelace hands the card the footprint the
+  // hint asked for, and anything past it spills over whatever sits beneath.
+  // The map is the only part with a configured height; the rest are the
+  // measured heights of the optional sections, so switching one off gives
+  // its space back instead of leaving a gap.
+  _estimatedHeightPx() {
+    const cfg = this._config || DEFAULTS;
+    const on = (key) => (cfg[key] !== undefined ? cfg[key] : DEFAULTS[key]);
+    let px = 40 + 28; // header, plus the card's own top and bottom padding
+    if (on("show_status_bar")) px += 46;
+    if (on("show_host_stats")) px += 96;
+    px += Number(cfg.graph_height) || DEFAULTS.graph_height;
+    if (on("show_legend")) px += 62;
+    if (on("show_entity_finder")) px += 104;
+    if (on("show_debug")) px += 44;
+    if (on("show_integration_list")) px += 210;
+    return px;
   }
 
-  // Hint for HA's "sections" dashboard layout so the card can be given a
-  // generous default footprint there; harmless no-op on layouts that don't
-  // read it. For truly filling an entire dashboard, a "Panel" view (see
-  // file header) is the reliable route - Lovelace's outer layout is
-  // ultimately controlled by the view type, not by the card alone.
+  // Masonry counts in 50px units.
+  getCardSize() {
+    return Math.ceil(this._estimatedHeightPx() / 50);
+  }
+
+  // The "sections" layout lays cards on a 56px row grid with 8px gaps, so
+  // n rows are worth n * 56 + (n - 1) * 8. For truly filling an entire
+  // dashboard, a "Panel" view (see file header) is still the reliable
+  // route - Lovelace's outer layout is controlled by the view type, not by
+  // the card alone.
+  getGridOptions() {
+    const rows = Math.max(4, Math.ceil((this._estimatedHeightPx() + 8) / 64));
+    return { columns: 12, rows, min_columns: 6, min_rows: 4 };
+  }
+
+  // The name this hint went by before 2024.11. Same numbers, older keys.
   getLayoutOptions() {
-    return { grid_columns: 12, grid_rows: 16, grid_min_columns: 6, grid_min_rows: 8 };
+    const g = this.getGridOptions();
+    return { grid_columns: g.columns, grid_rows: g.rows, grid_min_columns: g.min_columns, grid_min_rows: g.min_rows };
   }
 
   _build() {
@@ -1289,7 +1318,7 @@ class SystemMapCard extends HTMLElement {
       </ha-card>
       <style>
         :host { display: block; height: 100%; }
-        ha-card { padding: 12px 16px 16px; height: 100%; box-sizing: border-box; display: flex; flex-direction: column; }
+        ha-card { padding: 12px 16px 16px; min-height: 100%; box-sizing: border-box; display: flex; flex-direction: column; }
         .smc-header { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; flex: 0 0 auto; }
         .smc-title { font-size: 1.2em; font-weight: 500; color: var(--primary-text-color); flex: 1; }
         .smc-filter { display: flex; align-items: center; gap: 4px; font-size: 0.85em; color: var(--secondary-text-color); cursor: pointer; user-select: none; }

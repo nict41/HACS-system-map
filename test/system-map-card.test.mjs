@@ -2100,4 +2100,37 @@ T("add-on info is fetched once per uncached add-on, in batches",
     return [slugs.includes("a0"), slugs.length === new Set(slugs).size, slugs.length];
   })(), [false, true, 12]);
 
+// A fixed size hint is what made a taller map spill past the footprint
+// Lovelace handed the card.
+T("a taller map asks for a taller footprint",
+  (() => {
+    const a = newCard(); a._config = { ...a._config, graph_height: 480 };
+    const b = newCard(); b._config = { ...b._config, graph_height: 1200 };
+    return [b.getCardSize() > a.getCardSize(), b.getGridOptions().rows > a.getGridOptions().rows];
+  })(), [true, true]);
+T("the footprint covers the map plus the sections around it",
+  (() => {
+    const card = newCard();
+    card._config = { ...card._config, graph_height: 600 };
+    const g = card.getGridOptions();
+    return [g.rows * 56 + (g.rows - 1) * 8 >= 600, card.getCardSize() * 50 > 600];
+  })(), [true, true]);
+T("switching a section off gives its space back",
+  (() => {
+    const on = newCard(); on._config = { ...on._config, show_integration_list: true, show_entity_finder: true };
+    const off = newCard(); off._config = { ...off._config, show_integration_list: false, show_entity_finder: false };
+    return off._estimatedHeightPx() < on._estimatedHeightPx();
+  })(), true);
+T("the older layout hint reports the same numbers",
+  (() => {
+    const card = newCard();
+    const g = card.getGridOptions(), l = card.getLayoutOptions();
+    return [l.grid_rows === g.rows, l.grid_columns === g.columns];
+  })(), [true, true]);
+T("a card asked for its size before it is configured still answers",
+  (() => {
+    const card = new SystemMapCard();
+    return [Number.isFinite(card.getCardSize()), card.getCardSize() > 0];
+  })(), [true, true]);
+
 process.exit(all ? 0 : 1);

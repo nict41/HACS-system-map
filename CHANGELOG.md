@@ -8,6 +8,21 @@ was already there in a way an existing dashboard would notice.
 `VERSION` in `system-map-card.js` is the source of truth and CI refuses to
 publish a release whose tag doesn't match it.
 
+## [1.15.1] - 2026-09-04
+
+### Fixed
+
+- Raising the map height no longer makes the card spill out of its own
+  area. The size hints the card gives Lovelace were fixed numbers, so a
+  taller map was drawn into a footprint that had been reserved for the old
+  one and overflowed whatever sat beneath it. Both hints - masonry's card
+  size and the sections grid's row count - are now worked out from the
+  configured map height plus the sections that are actually switched on, so
+  turning one off gives its space back as well. `ha-card` uses `min-height`
+  rather than a hard `height`, so a footprint that is still too small (a
+  card resized by hand keeps the size it was given) makes the card grow
+  rather than clip its own contents.
+
 ## [1.15.0] - 2026-09-03
 
 ### Changed
