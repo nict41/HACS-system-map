@@ -8,6 +8,25 @@ was already there in a way an existing dashboard would notice.
 `VERSION` in `system-map-card.js` is the source of truth and CI refuses to
 publish a release whose tag doesn't match it.
 
+## [1.16.1] - 2026-09-04
+
+### Fixed
+
+- Refreshing no longer blanks the add-on icons and ownership edges while it
+  works. The refresh button emptied the add-on caches before refetching, so
+  the map redrew from nothing and filled back in over the following seconds.
+  Entries are now revalidated in place: each one is replaced only once its
+  replacement has arrived, and a fetch that fails leaves what was there.
+  Uninstalling an add-on is what drops its entry now, since nothing else
+  does.
+- An add-on icon whose signature could not be renewed keeps the icon already
+  on screen instead of disappearing until the next refresh succeeds.
+- A tunnel scan that finds no ingress rules holds the routes from the last
+  scan that did, rather than blanking every hostname pill. The rules are
+  logged once at startup, so an empty scan is far more likely to have missed
+  the window than to mean the tunnel stopped exposing anything - and the
+  evidence panel says when routes are being held.
+
 ## [1.16.0] - 2026-09-04
 
 ### Added

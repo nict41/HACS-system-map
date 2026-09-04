@@ -112,7 +112,7 @@
 // version in the console is always the version of the file that's running -
 // which is the first thing worth knowing when a dashboard misbehaves after
 // an update, and the quickest way to catch a stale browser cache.
-const VERSION = "1.16.0";
+const VERSION = "1.16.1";
 
 console.info(
   `%c SYSTEM-MAP-CARD %c v${VERSION} `,
@@ -2193,11 +2193,12 @@ class SystemMapCard extends HTMLElement {
       this._scheduleRefresh();
       return;
     }
-    if (force) {
-      dataCache.data = null;
-      this._addonInfoCache.clear();
-      this._addonIcons.clear();
-    }
+    // Deliberately not clearing the add-on caches here. Emptying them made
+    // the map redraw with no icons and no ownership edges until the walk
+    // behind it finished, which is a worse thing to look at than data a few
+    // seconds old. They are revalidated in place instead: each entry is
+    // replaced only once its replacement has arrived.
+    if (force) dataCache.data = null;
     this._loadErrors = {};
 
     // Deliberately only these three - fast, and everything the graph's
@@ -2274,7 +2275,7 @@ class SystemMapCard extends HTMLElement {
     // Deliberately after the first paint, and deliberately not awaited: both
     // are slow, neither changes the shape of the map, and the derived
     // hardware edges need one /addons/<slug>/info per add-on.
-    if (this._config.discover_hardware) this._loadAddonOptions();
+    if (this._config.discover_hardware) this._loadAddonOptions(force);
     else this._loadRouteLogs().then(() => { this._derive(); this._saveCache(); this._renderGraph(); });
     if (this._config.show_sparklines) this._loadHistory();
     this._scheduleRefresh();
@@ -2393,11 +2394,15 @@ class SystemMapCard extends HTMLElement {
 
   // Ownership edges are derived by matching a discovered device path against
   // the add-on's own options, which means one /addons/<slug>/info per add-on.
-  async _loadAddonOptions() {
-    const pending = this._addons.filter((a) => !this._addonInfoCache.has(a.slug));
+  // revalidate: re-read every add-on rather than only the ones with nothing
+  // cached. What the user asked for when they pressed refresh, and still not
+  // a reason to throw away what is on screen first.
+  async _loadAddonOptions(revalidate = false) {
+    const pending = revalidate ? this._addons.slice() : this._addons.filter((a) => !this._addonInfoCache.has(a.slug));
     const alive = () => this.isConnected;
     // _fetchAddonInfo swallows its own errors, so no batch is abandoned.
-    if (!(await inBatches(pending, ADDON_FETCH_BATCH, (a) => this._fetchAddonInfo(a.slug), alive))) return;
+    if (!(await inBatches(pending, ADDON_FETCH_BATCH, (a) => this._fetchAddonInfo(a.slug, revalidate), alive))) return;
+    this._forgetUninstalled();
     await this._loadAddonIcons();
     await this._loadRouteLogs();
     this._derive();
@@ -2435,7 +2440,9 @@ class SystemMapCard extends HTMLElement {
           });
           if (res?.path) this._addonIcons.set(addon.slug, res.path);
         } catch (e) {
-          this._addonIcons.delete(addon.slug);
+          // Deliberately keeps the icon already on screen. A signature that
+          // could not be renewed is not a reason to blank a node that had a
+          // perfectly good icon a second ago; the next refresh tries again.
         }
       },
       () => this.isConnected,
@@ -2506,7 +2513,13 @@ class SystemMapCard extends HTMLElement {
       }
     }
 
-    this._logRoutes = found;
+    // Held rather than dropped. Ingress rules are logged once at startup, so
+    // a scan that reads a healthy log and finds none has far more likely
+    // missed the window than watched the tunnel stop exposing anything -
+    // and blanking every hostname pill on that guess is the worse mistake.
+    // The evidence panel says when the routes on screen are being held.
+    if (!found.length && this._logRoutes.length) this._routeScan.held = this._logRoutes.length;
+    else this._logRoutes = found;
 
     // Optional, and off by default because it means reading every running
     // add-on's whole log. An add-on logs the services it dials at startup -
@@ -2824,6 +2837,9 @@ class SystemMapCard extends HTMLElement {
     const scanRows = [
       ["Logs read", (scan.scanned || []).length ? esc((scan.scanned || []).join("; ")) : none("none")],
       scan.fallback ? ["Fallback", "no add-on's options named a tunnel, so every running add-on's log was read"] : null,
+      scan.held
+        ? ["Held", `this scan found no ingress rules, so the ${scan.held} route(s) from the last successful scan are still shown`]
+        : null,
       ["Skipped", (scan.considered || []).length ? esc((scan.considered || []).join("; ")) : none("none")],
       ["Treated as local", esc([...this._localHosts()].join(", "))],
     ].filter(Boolean);
@@ -4263,8 +4279,19 @@ class SystemMapCard extends HTMLElement {
     return keys;
   }
 
-  async _fetchAddonInfo(slug) {
-    if (this._addonInfoCache.has(slug)) return this._addonInfoCache.get(slug);
+  // Nothing else drops cache entries any more, so uninstalling an add-on has
+  // to, or its icon and options would outlive it.
+  _forgetUninstalled() {
+    const installed = new Set(this._addons.map((a) => a.slug));
+    for (const slug of [...this._addonInfoCache.keys()]) if (!installed.has(slug)) this._addonInfoCache.delete(slug);
+    for (const slug of [...this._addonIcons.keys()]) if (!installed.has(slug)) this._addonIcons.delete(slug);
+  }
+
+  // revalidate: fetch even when there is a cached answer. The cached value
+  // stays in place until the new one arrives, and a failed fetch leaves it
+  // there, so a node never loses detail it already had.
+  async _fetchAddonInfo(slug, revalidate = false) {
+    if (!revalidate && this._addonInfoCache.has(slug)) return this._addonInfoCache.get(slug);
     try {
       const res = await this._hass.connection.sendMessagePromise({
         type: "supervisor/api",

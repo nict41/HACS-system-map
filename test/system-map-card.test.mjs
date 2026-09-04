@@ -2166,11 +2166,76 @@ T("pressing refresh re-checks everything even when the cache is warm",
     const card = newCard(); const calls = [];
     stubFetches(card, calls);
     await card._refreshData();
-    card._addonInfoCache.set("stale", { v: 1 });
+    let revalidated = null;
+    card._loadAddonOptions = async (r) => { revalidated = r; };
     calls.length = 0;
     await card._refreshData({ force: true });
-    return [calls.length > 0, card._addonInfoCache.has("stale")];
-  })(), [true, false]);
+    return [calls.length > 0, revalidated];
+  })(), [true, true]);
+
+// Refreshing used to empty the add-on caches first, so the map redrew with
+// no icons and no ownership edges until the walk behind it caught up.
+T("refreshing never empties what is already on screen",
+  await (async () => {
+    resetCache();
+    const card = newCard(); const calls = [];
+    stubFetches(card, calls);
+    card._addonInfoCache.set("core_mosquitto", { name: "Cached" });
+    card._addonIcons.set("core_mosquitto", "/icon/old");
+    let emptyDuringWalk = false;
+    card._loadAddonOptions = async () => {
+      emptyDuringWalk = !card._addonInfoCache.size || !card._addonIcons.size;
+    };
+    await card._refreshData({ force: true });
+    return [emptyDuringWalk, card._addonIcons.get("core_mosquitto")];
+  })(), [false, "/icon/old"]);
+
+T("a revalidating walk re-reads every add-on, an ordinary one only the gaps",
+  await (async () => {
+    const card = newCard();
+    card._addons = [{ slug: "a" }, { slug: "b" }, { slug: "c" }];
+    card._addonInfoCache = new Map([["a", { v: 1 }]]);
+    card._loadAddonIcons = async () => {};
+    card._loadRouteLogs = async () => {};
+    const seen = [];
+    card._fetchAddonInfo = async (slug) => { seen.push(slug); card._addonInfoCache.set(slug, { v: 2 }); };
+    await card._loadAddonOptions(false);
+    const lazy = seen.slice();
+    seen.length = 0;
+    await card._loadAddonOptions(true);
+    return [lazy, seen];
+  })(), [["b", "c"], ["a", "b", "c"]]);
+
+T("a cached entry survives a revalidation that fails",
+  await (async () => {
+    const card = newCard();
+    card._addonInfoCache.set("core_mosquitto", { name: "Known good" });
+    card._hass.connection = { sendMessagePromise: async () => { throw new Error("nope"); } };
+    await card._fetchAddonInfo("core_mosquitto", true);
+    return card._addonInfoCache.get("core_mosquitto").name;
+  })(), "Known good");
+
+T("an icon that cannot be re-signed keeps the one already shown",
+  await (async () => {
+    const card = newCard();
+    card._addons = [{ slug: "a_with", name: "Has icon", state: "started", icon: true }];
+    card._addonIcons.set("a_with", "/icon/old");
+    card._hass.connection = { sendMessagePromise: async () => { throw new Error("nope"); } };
+    await card._loadAddonIcons();
+    return card._addonIcons.get("a_with");
+  })(), "/icon/old");
+
+T("an uninstalled add-on is forgotten, so nothing outlives it",
+  await (async () => {
+    const card = newCard();
+    card._addons = [{ slug: "still_here" }];
+    card._addonInfoCache = new Map([["still_here", {}], ["removed", {}]]);
+    card._addonIcons = new Map([["still_here", "/a"], ["removed", "/b"]]);
+    card._loadAddonIcons = async () => {};
+    card._loadRouteLogs = async () => {};
+    await card._loadAddonOptions();
+    return [[...card._addonInfoCache.keys()], [...card._addonIcons.keys()]];
+  })(), [["still_here"], ["still_here"]]);
 
 T("data older than the cache window is fetched again",
   await (async () => {
@@ -2206,5 +2271,24 @@ T("the cache window never outlives a signed icon URL",
   })(), true);
 
 resetCache();
+
+// A tunnel logs its ingress rules once, at startup. A scan that misses that
+// window used to blank every hostname pill on the map.
+T("a scan that finds nothing holds the routes from the last one",
+  await (async () => {
+    const card = newCard();
+    card._logRoutes = [{ hostname: "kept.example.com", service: "http://192.168.1.50:8123", source: "log" }];
+    card._fetchAddonLog = async () => "nothing useful in this window";
+    await card._loadRouteLogs();
+    return [card._logRoutes.map((r) => r.hostname), card._routeScan.held];
+  })(), [["kept.example.com"], 1]);
+T("a scan that does find rules replaces the held ones",
+  await (async () => {
+    const card = newCard();
+    card._logRoutes = [{ hostname: "old.example.com", service: "http://192.168.1.50:1", source: "log" }];
+    card._fetchAddonLog = async () => CLOUDFLARED_LOG;
+    await card._loadRouteLogs();
+    return [card._logRoutes.some((r) => r.hostname === "old.example.com"), card._routeScan.held ?? null];
+  })(), [false, null]);
 
 process.exit(all ? 0 : 1);
