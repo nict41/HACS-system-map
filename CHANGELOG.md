@@ -8,6 +8,27 @@ was already there in a way an existing dashboard would notice.
 `VERSION` in `system-map-card.js` is the source of truth and CI refuses to
 publish a release whose tag doesn't match it.
 
+## [1.16.0] - 2026-09-04
+
+### Added
+
+- Fetched data is cached and shared across every card on the page, so
+  reopening a view paints the map straight away instead of repeating the
+  whole walk - the registry calls, one Supervisor call per add-on, a log
+  read per tunnel - for data that was current seconds earlier. The window
+  is the configured refresh interval, so nothing is shown any staler than
+  it would have been anyway, and the next background refresh is timed from
+  when the data was actually fetched rather than from when the card was
+  built. With background refresh switched off the cache holds until you ask
+  for new data, capped at 45 minutes because the add-on icon URLs in it are
+  signed and expire after an hour.
+- The refresh button now genuinely re-checks everything, including the
+  add-on options a background refresh deliberately leaves alone.
+
+The cache is in memory only, never session storage: add-on options carry
+credentials such as a tunnel token or a share password, and those should
+not outlive the page or be readable by anything else running on it.
+
 ## [1.15.1] - 2026-09-04
 
 ### Fixed

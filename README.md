@@ -108,7 +108,7 @@ editor (three-dot menu on the card -> Edit).
 | `graph_height` | `480` | Height of the map area, in pixels |
 | `group_services` | `true` | Split the services tier into Apps / Network services / Administration, from each add-on's own manifest |
 | `columns` | `6` | Service cards per row (3-12). The canvas widens to suit, so a wide dashboard can use its width |
-| `refresh_interval` | `60` | Seconds between background refreshes; `0` disables |
+| `refresh_interval` | `60` | Seconds between background refreshes; `0` disables. Also how long fetched data is reused: reopening the view within this window paints from cache instead of refetching. The &#8635; button always re-checks everything. |
 | `hide_inactive` | `false` | Start with stopped/disabled things hidden |
 | `tiers` | all four | Which tiers to draw |
 | `show_status_bar` | `true` | The status strip along the top |

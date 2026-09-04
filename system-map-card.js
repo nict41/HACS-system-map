@@ -112,7 +112,7 @@
 // version in the console is always the version of the file that's running -
 // which is the first thing worth knowing when a dashboard misbehaves after
 // an update, and the quickest way to catch a stale browser cache.
-const VERSION = "1.15.1";
+const VERSION = "1.16.0";
 
 console.info(
   `%c SYSTEM-MAP-CARD %c v${VERSION} `,
@@ -321,6 +321,21 @@ const LOG_SCAN_LINES = 20000;
 // firing all of them at once is what makes a Pi stall. Five in flight is
 // several times faster and still gentle.
 const ADDON_FETCH_BATCH = 5;
+
+// One data cache for the page, shared by every card instance rather than
+// held on one of them. Reopening a view builds a fresh card, and without
+// this each new one repeats the entire walk - the registry calls, one
+// Supervisor call per add-on, a log read per tunnel - for data that was
+// current seconds ago. Cached data paints immediately and the next
+// scheduled refresh is measured from when it was actually fetched, so
+// nothing ends up staler than it would have been anyway.
+//
+// Deliberately in memory only. Add-on options carry credentials - a tunnel
+// token, a share password - and those have no business in session storage,
+// where they would outlive the page and be readable by anything else
+// running on it.
+const CACHE_MAX_MS = 45 * 60 * 1000; // a signed icon URL is good for an hour
+const dataCache = { at: 0, data: null };
 
 // Applies fn to items, ADDON_FETCH_BATCH at a time. Checks alive() between
 // batches so a card removed mid-walk (dashboard switched) stops promptly;
@@ -1447,7 +1462,7 @@ class SystemMapCard extends HTMLElement {
       </style>
     `;
 
-    this.querySelector(".smc-refresh").addEventListener("click", () => this._refreshData());
+    this.querySelector(".smc-refresh").addEventListener("click", () => this._refreshData({ force: true }));
 
     const filterCb = this.querySelector(".smc-hide-inactive");
     filterCb.checked = this._hideInactive;
@@ -2165,7 +2180,24 @@ class SystemMapCard extends HTMLElement {
     }
   }
 
-  async _refreshData() {
+  // force: the user pressed refresh, so genuinely re-check everything -
+  // the shared cache, and the add-on options that a background refresh
+  // deliberately leaves alone.
+  async _refreshData({ force = false } = {}) {
+    if (!force && this._loadFromCache()) {
+      this._derive();
+      this._buildProblemIndex();
+      this._buildCounts();
+      this._renderAllSafely();
+      if (this._config.show_sparklines && !Object.keys(this._history).length) this._loadHistory();
+      this._scheduleRefresh();
+      return;
+    }
+    if (force) {
+      dataCache.data = null;
+      this._addonInfoCache.clear();
+      this._addonIcons.clear();
+    }
     this._loadErrors = {};
 
     // Deliberately only these three - fast, and everything the graph's
@@ -2236,9 +2268,99 @@ class SystemMapCard extends HTMLElement {
     this._buildProblemIndex();
     this._buildCounts();
 
-    // Belt-and-suspenders: whatever happens in rendering, the loading
-    // overlay must not get stuck showing forever, and a render bug should
-    // surface as a visible error, not a silent hang.
+    this._renderAllSafely();
+    this._saveCache();
+
+    // Deliberately after the first paint, and deliberately not awaited: both
+    // are slow, neither changes the shape of the map, and the derived
+    // hardware edges need one /addons/<slug>/info per add-on.
+    if (this._config.discover_hardware) this._loadAddonOptions();
+    else this._loadRouteLogs().then(() => { this._derive(); this._saveCache(); this._renderGraph(); });
+    if (this._config.show_sparklines) this._loadHistory();
+    this._scheduleRefresh();
+  }
+
+  _scheduleRefresh() {
+    clearTimeout(this._refreshTimer);
+    const secs = Number(this._config.refresh_interval) || 0;
+    if (secs <= 0) return;
+    // Measured from when the data was fetched rather than from when this
+    // card was built, so reopening a view does not restart the clock and
+    // a card that painted from cache still refreshes on time.
+    const due = (dataCache.at || Date.now()) + Math.max(10, secs) * 1000 - Date.now();
+    this._refreshTimer = setTimeout(() => this._refreshData(), Math.max(1000, due));
+  }
+
+  // How long cached data may be reused. Background refresh turned off means
+  // the user has asked to see what was last fetched until they press
+  // refresh, so the cache then lasts as long as it safely can - capped
+  // because the add-on icon URLs in it are signed and do expire.
+  _cacheTtlMs() {
+    const secs = Number(this._config.refresh_interval) || 0;
+    return Math.min(secs > 0 ? Math.max(10, secs) * 1000 : CACHE_MAX_MS, CACHE_MAX_MS);
+  }
+
+  _saveCache() {
+    dataCache.at = this._lastRefreshed ? this._lastRefreshed.getTime() : Date.now();
+    dataCache.data = {
+      addons: this._addons,
+      entries: this._entries,
+      devices: this._devices,
+      areas: this._areas,
+      hardware: this._hardware,
+      system: this._system,
+      issues: this._issues,
+      systemHealth: this._systemHealth,
+      entityRegistry: this._entityRegistry,
+      entityRegistryByEntityId: this._entityRegistryByEntityId,
+      // Shared by reference on purpose: invalidating one add-on's info when
+      // its detail panel is opened should be seen by every card on the page.
+      addonInfo: this._addonInfoCache,
+      addonIcons: this._addonIcons,
+      logRoutes: this._logRoutes,
+      logServices: this._logServices,
+      logSizes: this._logSizes,
+      logErrors: this._logErrors,
+      routeScan: this._routeScan,
+      tunnelSlugs: this._tunnelSlugs,
+      // Kept with the data so the error strip describes the data on screen
+      // rather than a fetch this card never made.
+      loadErrors: this._loadErrors,
+    };
+  }
+
+  // Fills the card in from the shared cache. Returns false - leaving the
+  // card untouched - when there is nothing cached or it has aged out.
+  _loadFromCache() {
+    if (!dataCache.data || Date.now() - dataCache.at > this._cacheTtlMs()) return false;
+    const d = dataCache.data;
+    this._addons = d.addons;
+    this._entries = d.entries;
+    this._devices = d.devices;
+    this._areas = d.areas;
+    this._hardware = d.hardware;
+    this._system = d.system;
+    this._issues = d.issues;
+    this._systemHealth = d.systemHealth;
+    this._entityRegistry = d.entityRegistry;
+    this._entityRegistryByEntityId = d.entityRegistryByEntityId;
+    this._addonInfoCache = d.addonInfo;
+    this._addonIcons = d.addonIcons;
+    this._logRoutes = d.logRoutes;
+    this._logServices = d.logServices;
+    this._logSizes = d.logSizes;
+    this._logErrors = d.logErrors;
+    this._routeScan = d.routeScan;
+    this._tunnelSlugs = d.tunnelSlugs;
+    this._loadErrors = { ...d.loadErrors };
+    this._lastRefreshed = new Date(dataCache.at);
+    return true;
+  }
+
+  // Whatever happens in rendering, the loading overlay must not get stuck
+  // showing forever, and a render bug should surface as a visible error
+  // rather than a silent hang.
+  _renderAllSafely() {
     try {
       this._renderAll();
     } catch (e) {
@@ -2249,20 +2371,6 @@ class SystemMapCard extends HTMLElement {
       const loadingEl = this.querySelector(".smc-loading");
       if (loadingEl) loadingEl.hidden = true;
     }
-
-    // Deliberately after the first paint, and deliberately not awaited: both
-    // are slow, neither changes the shape of the map, and the derived
-    // hardware edges need one /addons/<slug>/info per add-on.
-    if (this._config.discover_hardware) this._loadAddonOptions();
-    else this._loadRouteLogs().then(() => this._derive()).then(() => this._renderGraph());
-    if (this._config.show_sparklines) this._loadHistory();
-    this._scheduleRefresh();
-  }
-
-  _scheduleRefresh() {
-    clearTimeout(this._refreshTimer);
-    const secs = Number(this._config.refresh_interval) || 0;
-    if (secs > 0) this._refreshTimer = setTimeout(() => this._refreshData(), Math.max(10, secs) * 1000);
   }
 
   disconnectedCallback() {
@@ -2295,6 +2403,10 @@ class SystemMapCard extends HTMLElement {
     this._derive();
     this._buildProblemIndex();
     this._buildCounts();
+    // The expensive half of the load - one Supervisor call per add-on, a
+    // signed URL per icon, a log read per tunnel - so it belongs in the
+    // cache more than anything else does.
+    this._saveCache();
     // Everything, not just the graph. Add-on options and tunnel routes arrive
     // after the first paint, and they feed the status bar too - redrawing
     // only the graph left the Exposed pill permanently absent, because it is

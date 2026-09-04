@@ -15,7 +15,7 @@ import vm from "node:vm";
 
 const src = fs.readFileSync("system-map-card.js", "utf8") +
   "\nglobalThis.__SMC = SystemMapCard;\nglobalThis.__EDITOR = SystemMapCardEditor;\n" +
-  "globalThis.__EXPORT = { chipWidth, layoutGeometry, worstStatus, SVG_PAINT_PROPS, categoriseService, mappedFolders, inBatches, ADDON_FETCH_BATCH };\n";
+  "globalThis.__EXPORT = { chipWidth, layoutGeometry, worstStatus, SVG_PAINT_PROPS, categoriseService, mappedFolders, inBatches, ADDON_FETCH_BATCH, dataCache };\n";
 
 const makeEl = () => ({
   innerHTML: "", textContent: "", hidden: false, scrollTop: 0,
@@ -2132,5 +2132,79 @@ T("a card asked for its size before it is configured still answers",
     const card = new SystemMapCard();
     return [Number.isFinite(card.getCardSize()), card.getCardSize() > 0];
   })(), [true, true]);
+
+// Reopening a view builds a brand new card. Without a shared cache each one
+// repeated the whole walk for data fetched seconds earlier.
+const { dataCache } = __EXPORT;
+const resetCache = () => { dataCache.at = 0; dataCache.data = null; };
+const stubFetches = (card, log) => {
+  card._hass.connection = { sendMessagePromise: async (msg) => {
+    log.push(msg.type === "supervisor/api" ? msg.endpoint : msg.type);
+    if (msg.endpoint === "/addons") return { data: { addons: [] } };
+    return {};
+  } };
+  card._loadAddonOptions = async () => {};
+  card._loadRouteLogs = async () => {};
+  card._loadHistory = () => {};
+};
+
+T("a second card paints from the cache instead of refetching",
+  await (async () => {
+    resetCache();
+    const first = newCard(); const calls1 = [];
+    stubFetches(first, calls1);
+    await first._refreshData();
+    const second = newCard(); const calls2 = [];
+    stubFetches(second, calls2);
+    await second._refreshData();
+    return [calls1.length > 0, calls2.length, Number(second._lastRefreshed) === dataCache.at];
+  })(), [true, 0, true]);
+
+T("pressing refresh re-checks everything even when the cache is warm",
+  await (async () => {
+    resetCache();
+    const card = newCard(); const calls = [];
+    stubFetches(card, calls);
+    await card._refreshData();
+    card._addonInfoCache.set("stale", { v: 1 });
+    calls.length = 0;
+    await card._refreshData({ force: true });
+    return [calls.length > 0, card._addonInfoCache.has("stale")];
+  })(), [true, false]);
+
+T("data older than the cache window is fetched again",
+  await (async () => {
+    resetCache();
+    const card = newCard(); const calls = [];
+    stubFetches(card, calls);
+    await card._refreshData();
+    dataCache.at = Date.now() - (Number(card._config.refresh_interval) * 1000 + 5000);
+    calls.length = 0;
+    await card._refreshData();
+    return calls.length > 0;
+  })(), true);
+
+T("the next refresh is timed from when the data was fetched, not from now",
+  (() => {
+    resetCache();
+    const card = newCard();
+    card._config = { ...card._config, refresh_interval: 60 };
+    dataCache.at = Date.now() - 50000; dataCache.data = {};
+    let delay = null;
+    const realSetTimeout = ctx.setTimeout;
+    ctx.setTimeout = (fn, ms) => { delay = ms; return 1; };
+    card._scheduleRefresh();
+    ctx.setTimeout = realSetTimeout;
+    return delay > 1000 && delay <= 11000;
+  })(), true);
+
+T("the cache window never outlives a signed icon URL",
+  (() => {
+    const card = newCard();
+    card._config = { ...card._config, refresh_interval: 0 };
+    return card._cacheTtlMs() <= 45 * 60 * 1000;
+  })(), true);
+
+resetCache();
 
 process.exit(all ? 0 : 1);
